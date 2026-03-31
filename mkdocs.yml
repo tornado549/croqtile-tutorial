@@ -8,7 +8,7 @@ repo_url: https://github.com/codes1gn/croktile-tutorial
 theme:
   name: material
   favicon: assets/images/favicon.svg
-  logo: assets/images/favicon.svg
+  logo: assets/images/logo-2.png
   features:
     - navigation.instant
     - navigation.top
