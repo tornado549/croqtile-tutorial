@@ -2,7 +2,7 @@
 
 Welcome to the Choreo tutorial. This guide walks you through writing high-performance GPU kernels using Choreo, starting from scratch and building up to production-grade patterns.
 
-Each chapter introduces a small set of new concepts by evolving a running example. By the end, you will have encountered every major Choreo construct in a concrete, working program.
+Each chapter introduces a small set of new concepts by evolving a running example. By the end, you will have encountered every major Choreo construct in a concrete, working program. For detailed syntax design and language reference, see the [Coding Reference](../documentation/index.md).
 
 ## Chapters
 

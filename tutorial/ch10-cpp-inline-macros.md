@@ -2,9 +2,9 @@
 
 Choreo is a high-level DSL: you describe tiles, pipelines, and memory levels, and the compiler generates the tedious parts of CUDA-style kernels. Most of the time that is exactly what you want.
 
-Sometimes, though, you need to reach *below* the abstraction — to issue a specific PTX instruction, to insert a guard the tileflow layer does not express cleanly, or to parameterize a family of kernels with compile-time constants and static checks.
+Sometimes, though, you need to reach *below* the abstraction — to issue a specific PTX instruction, to insert a guard the Choreo layer does not express cleanly, or to parameterize a family of kernels with compile-time constants and static checks.
 
-This final chapter covers the two main escape hatches: **`__cpp__`**, which injects raw C++ (including inline assembly and PTX) verbatim into generated code, and **the Choreo preprocessor** — **`#define`**, **`#if` / `#ifdef` / `#else` / `#endif`**, and **`#error`** for macros and conditional compilation. Neither mechanism replaces good tileflow design; they complement it when the hardware or the build system demands something the DSL does not spell out directly.
+This final chapter covers the two main escape hatches: **`__cpp__`**, which injects raw C++ (including inline assembly and PTX) verbatim into generated code, and **the Choreo preprocessor** — **`#define`**, **`#if` / `#ifdef` / `#else` / `#endif`**, and **`#error`** for macros and conditional compilation. Neither mechanism replaces good Choreo design; they complement it when the hardware or the build system demands something the DSL does not spell out directly.
 
 If you read [Async Pipelining: inthreads, Events, and Warp Roles](ch06-warpspec.md), you already saw how **different warps** can own **different stages** of a pipeline. This chapter is the footnote engineers reach for when that pattern must also respect **register-file limits** and **ISA-level** tuning: **`setmaxnreg`** does not appear as a first-class Choreo keyword, but it *does* appear in shipping SM90 GEMMs via **`__cpp__`**.
 
@@ -20,15 +20,15 @@ For PTX wrapped in **`asm volatile("…")`**, the inner assembly string contains
 
 Multi-line injections work the same way: either embed **`\n`** in a normal string (as in the MoE-style guard below) or use a raw string that spans multiple lines inside **`R"( … )"`**. The compiler does not re-indent or reformat the string; whitespace inside the literal is preserved.
 
-It helps to have a concrete mental model of what **verbatim** means at compile time. Choreo parses tileflow around your **`__cpp__`** call sites, emits C++ (or CUDA) that implements that tileflow, and **splices** each **`__cpp__`** argument into the generated text **exactly** as if you had typed it yourself in the output file.
+It helps to have a concrete mental model of what **verbatim** means at compile time. Choreo parses the `__co__` body around your **`__cpp__`** call sites, emits C++ (or CUDA) that implements the Choreo function, and **splices** each **`__cpp__`** argument into the generated text **exactly** as if you had typed it yourself in the output file.
 
 There is no automatic bridge from Choreo symbols to C++ names unless the code generator already created those names and your string spells them correctly.
 
-That is why the early-return example names **`seg_end`** and **`seg_start`** explicitly: those identifiers must match the generated declarations in that function. If you rename something in tileflow and the generator changes its output, a stale **`__cpp__`** string can become a **hard compile error** in generated code — which is still preferable to silently wrong machine code, but it means **`__cpp__`** fragments deserve the same review attention as hand-written CUDA.
+That is why the early-return example names **`seg_end`** and **`seg_start`** explicitly: those identifiers must match the generated declarations in that function. If you rename something in the Choreo function and the generator changes its output, a stale **`__cpp__`** string can become a **hard compile error** in generated code — which is still preferable to silently wrong machine code, but it means **`__cpp__`** fragments deserve the same review attention as hand-written CUDA.
 
 On recent NVIDIA architectures, **warp-specialized** pipelines split work across warps or warpgroups: one side **produces** data (TMA loads, pointers, counters) and another **consumes** it (WGMMA, large register-resident accumulators). The producer needs **few** registers; the consumer needs **many**. The hardware exposes **dynamic register budget** hints via PTX such as **`setmaxnreg.dec`** and **`setmaxnreg.inc`**, which redistribute how many registers each warp is allowed to use at a given program point.
 
-In Choreo tileflow, you typically place these hints at the start of an **`inthreads.async`** branch that corresponds to producer vs consumer. The following pattern is adapted from high-performance GEMM kernels in the Choreo benchmark tree (for example block-scale GEMM on SM90):
+In a Choreo function, you typically place these hints at the start of an **`inthreads.async`** branch that corresponds to producer vs consumer. The following pattern is adapted from high-performance GEMM kernels in the Choreo benchmark tree (for example block-scale GEMM on SM90):
 
 ```choreo
 parallel p1 by 2 : group-4 {
@@ -75,13 +75,13 @@ If you tried to write the same thing with an ordinary string, every embedded **`
 __cpp__("if (seg_end - seg_start <= 0) return;\n\n");
 ```
 
-That is plain C++ control flow dropped into the generated function: if your indices say there is nothing to do, skip the rest. The exact variable names and types must match what the surrounding generated code actually declares — **`__cpp__`** does not magically know your tileflow symbols; it only pastes text.
+That is plain C++ control flow dropped into the generated function: if your indices say there is nothing to do, skip the rest. The exact variable names and types must match what the surrounding generated code actually declares — **`__cpp__`** does not magically know your Choreo symbols; it only pastes text.
 
-In **MoE GEMM**-style kernels, experts are processed in **segments**; some launches may have **zero width** for a given segment after routing. An early return avoids touching uninitialized ranges or issuing empty loops. The guard is trivial C++, but expressing “return from this generated function now” might not map cleanly to a single tileflow statement in every codegen path — hence a one-line **`__cpp__`** injection.
+In **MoE GEMM**-style kernels, experts are processed in **segments**; some launches may have **zero width** for a given segment after routing. An early return avoids touching uninitialized ranges or issuing empty loops. The guard is trivial C++, but expressing “return from this generated function now” might not map cleanly to a single Choreo statement in every codegen path — hence a one-line **`__cpp__`** injection.
 
 Treat **`__cpp__`** as **sharp**. You bypass Choreo’s usual checks on whatever is inside the string.
 
-You are responsible for **correctness** on the target SM, **synchronization** with async pipelines, and **ABI** compatibility with neighboring generated code. Prefer keeping injected fragments **small** and **localized** — one asm blob, one guard, one pragma — and let tileflow own structure and data movement.
+You are responsible for **correctness** on the target SM, **synchronization** with async pipelines, and **ABI** compatibility with neighboring generated code. Prefer keeping injected fragments **small** and **localized** — one asm blob, one guard, one pragma — and let the Choreo function own structure and data movement.
 
 When a single PTX hint or guard unlocks measurable performance (as with **`setmaxnreg`** in warp-specialized GEMM), **`__cpp__`** is the supported way to carry that detail into an otherwise declarative kernel.
 
@@ -96,7 +96,7 @@ Choreo ships a **preprocessor** that runs over your source before the main compi
 | `#ifdef` / `#ifndef` | Shorthand for “macro defined or not” |
 | `#error message` | Force a compile-time error with a message |
 
-Macros expand in **both** tileflow (**`__co__`**) regions and ordinary host or device C++ in the same file, so you can share numeric constants and feature flags across the whole program.
+Macros expand in **both** Choreo function (**`__co__`**) regions and ordinary host or device C++ in the same file, so you can share numeric constants and feature flags across the whole program.
 
 The preprocessor evaluates **integer constant expressions** in **`#if`** conditions using the same names you **`#define`**.
 
@@ -104,7 +104,7 @@ For nested configuration (architecture × precision × feature flags), chain **`
 
 **Object-like macros** excel when the same numeric literal must appear in **dozens** of places (tile extents, **`cdiv`** bounds, shared memory sizing), when you want **`#error`** to enforce relationships between those literals (swizzle vs tile K, warp M vs WGMMA hardware expectations), or when you generate **many kernel variants** from one source file by varying defines on the **compiler command line** (`-DMATMUL_TILE_K=128`) without editing the body.
 
-When a value is truly local to one C++ function and never crosses into tileflow, ordinary **`constexpr`** variables or templates in host/device C++ are often clearer. The tutorial’s matmul files skew toward macros because **tileflow and C++ share** those numbers; a single **`#define`** avoids drift between the two worlds.
+When a value is truly local to one C++ function and never crosses into the `__co__` body, ordinary **`constexpr`** variables or templates in host/device C++ are often clearer. The tutorial’s matmul files skew toward macros because **`__co__` and C++ share** those numbers; a single **`#define`** avoids drift between the two worlds.
 
 Typical matmul and GEMM sources centralize tile geometry in macros:
 
@@ -148,7 +148,7 @@ __co__ foo() {
 }
 ```
 
-The preprocessor keeps **one** branch and discards the other before Choreo parses the tileflow. That is different from a runtime **`if`**: no dead branch remains in the generated program for the disabled path.
+The preprocessor keeps **one** branch and discards the other before Choreo parses the `__co__` body. That is different from a runtime **`if`**: no dead branch remains in the generated program for the disabled path.
 
 Earlier tutorial tracks (for example **Lv1** optimization material) lean heavily on macros to **parameterize** kernels: tile sizes, unroll factors, and feature toggles become compile-time constants so you can sweep a search space or generate variants without duplicating entire files. The same **`#define` / `#if`** machinery you saw in matmul benchmarks is the glue for those experiments.
 
@@ -168,15 +168,15 @@ The generated asm would contain the **identifier** **`PRODUCER_MAXNREG`**, which
 
 In shipping kernels, immediates inside **`R"(asm …)"`** are almost always **numeric literals** typed out (`40`, `216`, `104`, …). To keep them consistent with macro-defined tile geometry, teams typically document the relationship in comments, use **`#if` / `#error`** so illegal combinations fail at compile time, or generate the **`.co`** from a template or script when a single source of truth is mandatory across many asm sites.
 
-Use **`#define` freely for tileflow geometry** (sizes that appear **outside** string literals). Treat **`__cpp__` strings** as opaque text the preprocessor will not reach into.
+Use **`#define` freely for Choreo function geometry** (sizes that appear **outside** string literals). Treat **`__cpp__` strings** as opaque text the preprocessor will not reach into.
 
 When you review or write an injection, check **scope**: is this string valid C++ at the exact insertion point, with correct braces and semicolons? Check **identifiers**: do all names match what codegen emits for this kernel version?
 
-Ask whether the instruction is legal on the **SM target** you compile for, and whether a fallback path would need **`#if`** at the Choreo level. For **synchronization**, especially with async pipelines from Chapter 6, confirm this asm interacts safely with producer/consumer ordering and barriers. Prefer **minimal surface**: express most of the logic in tileflow and reserve **`__cpp__`** for the one line the DSL does not cover.
+Ask whether the instruction is legal on the **SM target** you compile for, and whether a fallback path would need **`#if`** at the Choreo level. For **synchronization**, especially with async pipelines from Chapter 6, confirm this asm interacts safely with producer/consumer ordering and barriers. Prefer **minimal surface**: express most of the logic in the Choreo function and reserve **`__cpp__`** for the one line the DSL does not cover.
 
 If any answer is uncertain, prototype in a small CUDA file first, then port the proven fragment into **`__cpp__`**.
 
-Reach for **`__cpp__`** when you need **exact** control over a line of C++, inline assembly, or PTX in the **generated** output — register hints, targeted guards, intrinsics the DSL does not wrap. Reach for **`#define`** and conditionals when you want **compile-time** parameterization and **validation** shared across tileflow and C++ — tile dimensions, algorithm variants, and static **`#error`** checks.
+Reach for **`__cpp__`** when you need **exact** control over a line of C++, inline assembly, or PTX in the **generated** output — register hints, targeted guards, intrinsics the DSL does not wrap. Reach for **`#define`** and conditionals when you want **compile-time** parameterization and **validation** shared across the `__co__` body and C++ — tile dimensions, algorithm variants, and static **`#error`** checks.
 
 Together they close the loop: Choreo keeps everyday kernels readable and structured, while **`__cpp__`** and the preprocessor let expert paths stay **honest** (asserted constraints) and **complete** (hardware-specific details where they matter).
 
@@ -188,9 +188,9 @@ Start with **macros and `#error` guards**. They encode the contract: allowed til
 
 Next is **host setup** — buffers, launch configuration, timing; often ordinary C++.
 
-Then scan **`__co__` tileflow** for the orchestration story: **`parallel`**, **`foreach`**, TMA/MMA, **`inthreads.async`**, events. Map each region back to the chapters in this tutorial.
+Then scan the **`__co__` function** for the orchestration story: **`parallel`**, **`foreach`**, TMA/MMA, **`inthreads.async`**, events. Map each region back to the chapters in this tutorial.
 
-Finally, find **`__cpp__` islands** — usually a handful of lines. Pause on each one and ask what the hardware gets that tileflow does not spell out (register hints, returns, intrinsics).
+Finally, find **`__cpp__` islands** — usually a handful of lines. Pause on each one and ask what the hardware gets that the DSL does not spell out (register hints, returns, intrinsics).
 
 That order prevents getting lost in the middle of a warp-specialized loop before you know which **`MATMUL_*`** constants you are allowed to change.
 
@@ -198,12 +198,12 @@ That order prevents getting lost in the middle of a warp-specialized loop before
 
 Other **`__cpp__`** uses include simple C++ control flow such as early **`return`** when a segment range is empty (as in MoE-style GEMM sources).
 
-Choreo’s preprocessor supports **`#define`**, **`#if` / `#ifdef` / `#ifndef` / `#else` / `#endif`**, and **`#error`**; macros apply to tileflow and C++ alike, with **no function-like macros** — only object-like **`#define NAME value`**. **`#error`** under **`#if`** encodes compile-time requirements on configuration constants, a pattern ubiquitous in matmul benchmarks.
+Choreo’s preprocessor supports **`#define`**, **`#if` / `#ifdef` / `#ifndef` / `#else` / `#endif`**, and **`#error`**; macros apply to `__co__` and C++ regions alike, with **no function-like macros** — only object-like **`#define NAME value`**. **`#error`** under **`#if`** encodes compile-time requirements on configuration constants, a pattern ubiquitous in matmul benchmarks.
 
-That finishes the Choreo DSL tutorial track at the boundary between declarative tileflow and the low-level reality of production GPU kernels. You started from a running program ([Hello Choreo](ch01-hello-choreo.md)), learned how data moves and pipelines overlap, saw TMA and swizzle, and connected MMA and WGMMA to tile shapes.
+That finishes the Choreo DSL tutorial track at the boundary between declarative Choreo orchestration and the low-level reality of production GPU kernels. You started from a running program ([Hello Choreo](ch01-hello-choreo.md)), learned how data moves and pipelines overlap, saw TMA and swizzle, and connected MMA and WGMMA to tile shapes.
 
 You specialized warps for async roles, iterated persistent tiles, scaled across warpgroups, and shaped irregular access with **`view`** / **`from`**. This chapter is the **pressure valve**: when the model is right but the last percent needs a PTX hint or a static configuration guard, you know which door to open.
 
-From here, the most productive next step is to read a full benchmark kernel end to end — **macros at the top**, **tileflow in the middle**, and the occasional **`__cpp__` hook** where the hardware demands it — then change one constant or one guard, rebuild, and measure.
+From here, the most productive next step is to read a full benchmark kernel end to end — **macros at the top**, **`__co__` function in the middle**, and the occasional **`__cpp__` hook** where the hardware demands it — then change one constant or one guard, rebuild, and measure.
 
 Small, deliberate edits beat large rewrites; the toolchain and the **`#error`** lines will tell you when a configuration stops being legal long before you chase mysterious numerical wrong answers on the GPU.

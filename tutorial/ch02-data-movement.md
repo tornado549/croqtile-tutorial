@@ -1,12 +1,12 @@
 # Data Movement Basics: Moving Data Blocks as a Whole
 
-In Chapter 1, you added two arrays element by element. The tileflow program carved the tensors into chunks, copied each chunk into local memory with `dma.copy`, called a tiny CUDA kernel, and wrote the result back. That pattern is a perfect introduction to Choreo because the arithmetic is trivial: every output element depends only on the matching input elements in the same place.
+In Chapter 1, you added two arrays element by element. The Choreo function carved the tensors into chunks, copied each chunk into local memory with `dma.copy`, computed the addition inline with `foreach` and `.at()`, and wrote the result back. That pattern is a perfect introduction to Choreo because the arithmetic is trivial: every output element depends only on the matching input elements in the same place.
 
 Matrix multiplication is different. Each output element is a dot product along an entire *inner* dimension, so a naïve kernel touches a lot of global data unless you reorganize how work and memory line up. This chapter uses plain matrix multiply — first without explicit DMA, then with `dma.copy` and tiling — to show how Choreo expresses **element-level indexing**, **tile index composition**, and **nested parallelism**. By the end, you will have a mental model for why GPUs move data in blocks and how Choreo makes that explicit.
 
 ## The Scalar Matmul: Parallelism Without DMA
 
-We start with the smallest complete matmul in the Choreo test suite: no DMA, no device kernel call in the tileflow — just `parallel`, `foreach`, and arithmetic on spanned tensors. It is not how you would ship production GEMM, but it is the cleanest place to learn `.at()`, `#`, and `span`.
+We start with the smallest complete matmul in the Choreo test suite: no DMA, no device kernel call in the Choreo function — just `parallel`, `foreach`, and arithmetic on spanned tensors. It is not how you would ship production GEMM, but it is the cleanest place to learn `.at()`, `#`, and `span`.
 
 **Function shape and output allocation.**
 
@@ -77,7 +77,7 @@ In Choreo, for a fixed `(m, n, k)` inside tile `(p, q)`:
 - `rhs.at(k, n#q)` takes row `k` and column `n#q` from the right matrix.
 - `output.at(m#p, n#q)` accumulates into the result cell at that global row and column.
 
-No temporary buffers, no `dma.copy` — the compiler still has to implement loads and stores under the hood, but the **tileflow** you wrote is entirely in terms of global tensor indices.
+No temporary buffers, no `dma.copy` — the compiler still has to implement loads and stores under the hood, but the **Choreo function** you wrote is entirely in terms of global tensor indices.
 
 **Host side: owning buffers with `make_spandata`.**
 
@@ -96,9 +96,9 @@ int main() {
 }
 ```
 
-`make_spandata` builds a **dense owning buffer** with the given shape. It is the host-side counterpart to the `spanned_data` return type from Chapter 1: you can fill it, query `.shape()`, and pass a non-owning `view()` into a `__co__` function so the tileflow sees a normal spanned input.
+`make_spandata` builds a **dense owning buffer** with the given shape. It is the host-side counterpart to the `spanned_data` return type from Chapter 1: you can fill it, query `.shape()`, and pass a non-owning `view()` into a `__co__` function so the Choreo function sees a normal spanned input.
 
-The verification loop is ordinary C++: compare `res` against a reference triple loop over `lhs` and `rhs`. The point of this chapter is the tileflow; the host code stays boring on purpose.
+The verification loop is ordinary C++: compare `res` against a reference triple loop over `lhs` and `rhs`. The point of this chapter is the Choreo function; the host code stays boring on purpose.
 
 **What this version teaches — and what it omits.**
 
@@ -113,9 +113,9 @@ You have now seen:
 
 What you have *not* seen yet is any control over **where** those `lhs.at` / `rhs.at` reads land in the memory hierarchy. For large matrices on real hardware, reading every `k` step from far-away global memory inside the innermost loop is exactly what you want to fix next. That is where DMA and explicit local buffers enter the story.
 
-**Complete scalar matmul (tileflow + host).**
+**Complete scalar matmul (Choreo function + host).**
 
-For reference, here is the full scalar program as it appears in the Choreo tests (minus the `// REQUIRES` / `// RUN` harness lines). Read it top to bottom once: the tileflow fits on a handful of lines, and the host is almost entirely verification.
+For reference, here is the full scalar program as it appears in the Choreo tests (minus the `// REQUIRES` / `// RUN` harness lines). Read it top to bottom once: the `__co__` body fits on a handful of lines, and the host is almost entirely verification.
 
 ```choreo
 __co__ s32 [128, 256] matmul(s32 [128, 256] lhs, s32 [256, 256] rhs) {
@@ -148,7 +148,7 @@ int main() {
 }
 ```
 
-Notice the symmetry between the tileflow and the reference: the triple `foreach` is the same `i, j, k` contraction as the host's `ref` loop, only written in terms of tiles and composed indices. That is a useful pattern when you are debugging — if the host reference passes and the tileflow fails, you can usually narrow the bug to indexing (`#`, `.at`, or trip counts) rather than to the arithmetic itself.
+Notice the symmetry between the Choreo function and the reference: the triple `foreach` is the same `i, j, k` contraction as the host's `ref` loop, only written in terms of tiles and composed indices. That is a useful pattern when you are debugging — if the host reference passes and the Choreo function fails, you can usually narrow the bug to indexing (`#`, `.at`, or trip counts) rather than to the arithmetic itself.
 
 **Tracing a single output cell.**
 
@@ -211,7 +211,7 @@ Inside, `k` runs over the **K extent of this loaded tile**. The trip count is `2
 
 Crucially, the loads use **`lhs_load.data` and `rhs_load.data`**. The `dma.copy` future's `.data` member is the local spanned buffer you can index with `.at`. The global `lhs` / `rhs` parameters are not touched in the innermost statement — the hardware (via generated code) already brought the relevant rectangles into `local`.
 
-Nested `parallel` expresses **two levels of parallelism**: orchestration across the output grid, and finer-grained work inside each tile. On a GPU target, the compiler maps these to warps, blocks, and shared memory in ways that depend on the backend; the tileflow you write stays at the level of *what* is parallel, not *which* hardware register holds which tid.
+Nested `parallel` expresses **two levels of parallelism**: orchestration across the output grid, and finer-grained work inside each tile. On a GPU target, the compiler maps these to warps, blocks, and shared memory in ways that depend on the backend; the Choreo function you write stays at the level of *what* is parallel, not *which* hardware register holds which tid.
 
 **Dimension arithmetic for the DMA nest.**
 
@@ -221,9 +221,9 @@ Along `K`, the outer `foreach {tile_k} in [16]` fixes `#tile_k = 16`, so each DM
 
 You do not have to memorize these exact factors. What you should internalize is the **pattern**: outer parallelism over output regions, an outer sequential or tiled loop over `K` that triggers DMA, inner parallelism over the fine structure of the tile, and an inner `k` loop whose length is the **current K-tile height**, not the full `256` every time.
 
-**Complete DMA matmul (tileflow + host).**
+**Complete DMA matmul (Choreo function + host).**
 
-Here is the full `matmul-dma.co` body for side-by-side comparison with the scalar version. The tileflow is longer, but the `main` function is still mostly setup and verification.
+Here is the full `matmul-dma.co` body for side-by-side comparison with the scalar version. The Choreo function is longer, but the `main` function is still mostly setup and verification.
 
 ```choreo
 __co__ s32 [128, 256] matmul(s32 [128, 256] lhs, s32 [256, 256] rhs) {
@@ -265,7 +265,7 @@ int main() {
 }
 ```
 
-Comparing the two `__co__` functions line by line is instructive. Both allocate `output` the same way. Both ultimately implement `+= lhs * rhs` into `output.at(...)`. The scalar version states *which global elements* participate in each product; the DMA version states *which tiles were copied* before the product, then uses `.data` to read the copy. That is the whole conceptual step from Chapter 1's "copy a chunk, call a kernel" to "copy a chunk, stay in tileflow and index the chunk."
+Comparing the two `__co__` functions line by line is instructive. Both allocate `output` the same way. Both ultimately implement `+= lhs * rhs` into `output.at(...)`. The scalar version states *which global elements* participate in each product; the DMA version states *which tiles were copied* before the product, then uses `.data` to read the copy. That is the whole conceptual step from Chapter 1's element-wise DMA to "copy a tile, stay in the Choreo function and index the chunk."
 
 **Host program: views into stack arrays.**
 
@@ -285,17 +285,17 @@ int main() {
 }
 ```
 
-That is the same pattern as Chapter 1: you own the memory (`a`, `b`), and the spanview tells Choreo the rank (`2`) and element type. You could equally allocate with `make_spandata` and pass `.view()` — the tileflow only cares that the arguments are spanned tensors with consistent shapes.
+That is the same pattern as Chapter 1: you own the memory (`a`, `b`), and the spanview tells Choreo the rank (`2`) and element type. You could equally allocate with `make_spandata` and pass `.view()` — the Choreo function only cares that the arguments are spanned tensors with consistent shapes.
 
 **Scalar vs DMA: same math, different movement story.**
 
 Both programs implement the same multiply-accumulate. The scalar version is a **reference choreography**: easy to read, direct `.at` on globals. The DMA version is a **movement-aware** choreography: it states *which rectangles* of `lhs` and `rhs` live in `local` for each `tile_k`, and it nests parallelism so that sub-tiles `(qx, qy)` cooperate under each `(px, py)`.
 
-When you optimize further (pipelines, TMA, tensor cores), you will keep this structure: outer loops over tiles and memory stages, inner loops over compute, explicit `.data` views after copies. Chapter 1 gave you DMA around a device kernel; this chapter shows DMA feeding **inline** tileflow arithmetic — same primitives, richer loop nest.
+When you optimize further (pipelines, TMA, tensor cores), you will keep this structure: outer loops over tiles and memory stages, inner loops over compute, explicit `.data` views after copies. Chapter 1 gave you DMA with inline arithmetic on a simple addition; this chapter applies the same primitives to a richer loop nest.
 
 **How this extends Chapter 1.**
 
-In Chapter 1, `dma.copy` always fed a `__device__` kernel through raw pointers (`lhs_load.data`, `rhs_load.data`, `l1_out`). The matmul DMA example skips the kernel call and uses the same `.data` handles directly in tileflow expressions. Nothing magic changed about DMA — you still get a future, you still read the payload through `.data` — only the *consumer* of that payload is different.
+In Chapter 1, `dma.copy` staged data to local memory and `foreach` with `.at()` performed the addition inline. The matmul DMA example uses the same `.data` handles in a richer loop nest — nested `parallel` for a 2D tile hierarchy, an outer loop over K-tiles, and an inner per-element accumulation. Nothing changed about DMA — you still get a future, you still read the payload through `.data` — only the loop structure grew.
 
 Similarly, Chapter 1 introduced `chunkat` on 3D tensors for element-wise add. Here, `chunkat` takes **two** indices because each operand is a matrix and the tiling axes are the output row tile, the output column tile, and the `K` tile. The rule of thumb is that `chunkat` always lists indices in the same order as the dimensions you are carving; the meaning of each slot follows from the shape of the tensor in the signature.
 

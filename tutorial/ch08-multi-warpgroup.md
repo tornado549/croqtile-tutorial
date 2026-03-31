@@ -12,7 +12,7 @@ You might ask: **why not** keep **one** warpgroup per block and simply use **mor
 
 The rest of this chapter walks the benchmark kernel line by line, then generalizes the **`parallel p1 by N : group-4`** idiom and collects pitfalls that show up in real tuning.
 
-Keep a copy of **`matmul_f16_dynamic_mwg_impl_1.co`** open in your editor while you read. The prose quotes the **tileflow** accurately, but the **C++** file is where **asserts**, **timing**, and **preprocessor** guards live.
+Keep a copy of **`matmul_f16_dynamic_mwg_impl_1.co`** open in your editor while you read. The prose quotes the **Choreo function** accurately, but the **C++** file is where **asserts**, **timing**, and **preprocessor** guards live.
 
 ## One warpgroup vs. two: the M axis
 
@@ -46,13 +46,13 @@ Read **`by 2`** as “**two** warpgroup instances in this block.” Read **`: gr
 
 Outside this region, the block still has a single **K** loop and shared buffers. Inside, **`p1`** selects **which** of the two groups is executing — and that index drives **which slice of `lhs_load_s`** and **which slice of `output_s`** this group uses.
 
-The **128 threads** per warpgroup matter for how the hardware executes **`mma.row.row`**: WGMMA is a **collective** on a **warp group**, not a single warp. Choreo’s **`: group-4`** states that requirement in the tileflow so the lowering path can target the right instruction shape. When you read vendor documentation that says **“four warps cooperate”**, map that directly to **`group-4`** here.
+The **128 threads** per warpgroup matter for how the hardware executes **`mma.row.row`**: WGMMA is a **collective** on a **warp group**, not a single warp. Choreo’s **`: group-4`** states that requirement in the Choreo function so the lowering path can target the right instruction shape. When you read vendor documentation that says **“four warps cooperate”**, map that directly to **`group-4`** here.
 
-You can read **`p1`** as a **compile-time** or **tileflow-time** lane ID: it is not a runtime loop counter over threads inside one warp. It partitions **which warpgroup** owns **which strip** of the block’s **M** dimension in shared and in **`mc`**.
+You can read **`p1`** as a **compile-time** or **Choreo-level** lane ID: it is not a runtime loop counter over threads inside one warp. It partitions **which warpgroup** owns **which strip** of the block’s **M** dimension in shared and in **`mc`**.
 
 ## Full kernel walkthrough
 
-Below is the **tileflow** core of the benchmark kernel (eliding C++ harness). Compare it mentally to a single-warpgroup Hopper matmul: the **TMA loads** and **output tile** are sized for **`TILE_M`**, while **compute** is duplicated in shape but **split** across **`p1`**.
+Below is the **Choreo function** core of the benchmark kernel (eliding C++ harness). Compare it mentally to a single-warpgroup Hopper matmul: the **TMA loads** and **output tile** are sized for **`TILE_M`**, while **compute** is duplicated in shape but **split** across **`p1`**.
 
 The listing is the **authoritative** shape reference; the prose that follows names each region — grid, shared sizing, **K** loop, **store**, epilog **TMA**, and **swizzle** — without subsection headings so you can read it straight through.
 
@@ -101,7 +101,7 @@ For each **`iv_k`**, TMA fills **`lhs_load_s`** with the **`MATMUL_TILE_M × MAT
 
 **`ma`** — `lhs_load_s.subspan(MATMUL_WARP_M, MATMUL_TILE_K).at(p1, 0)` — is a **`64 × 64`** view of **`lhs_load_s`**: row offset **`p1 * 64`**, column offset **0**, so **`p1 = 0`** gets the **top** half of the **A** tile and **`p1 = 1`** the **bottom** half. **`mb`** — `rhs_load_s.chunkat(_, iv_warp)` — does **not** depend on **`p1`**: every warpgroup loads the **same** **B** stripes as **`iv_warp`** advances along **K**. **`mma.row.row mc, ma, mb`** gives each group **its own** **`mc`** (conceptually a per-group accumulator), accumulating **its** **A** rows against the **shared** **B** data. The inner **`foreach {iv_warp}`** walks **`TILE_K / WARP_K = 4`** steps along **K** inside shared memory, matching the usual blocked MMA pattern.
 
-Fix **`block_m`**, **`block_n`**, and **`iv_k`** for a moment. TMA lands **128×64** **A** and **64×64** **B** in shared. For **`p1 = 0`**, **`ma`** sees rows **0…63** of **`lhs_load_s`**; for **`p1 = 1`**, **64…127**. For **both**, **`mb`** cycles **four** **K**-shards of **`rhs_load_s`**. After this **`iv_k`**, each **`mc`** holds the **partial** sum for **its** **64×64** **C** patch over **K** so far; the outer **`foreach {iv_k}`** runs until **K** is exhausted. **TMA** appears before the **`parallel p1 by 2`** nest on purpose: **shared** must hold the new **A** and **B** slabs before **`mma.load`**. Real code may use **async** TMA and **barriers**; the tileflow still states **dependences** like a synchronous kernel. If you **pipeline** two **K** buffers, the **multi-warpgroup** split is unchanged: each **phase** still ends with **both** groups seeing **consistent** **`lhs_load_s`** and **`rhs_load_s`**.
+Fix **`block_m`**, **`block_n`**, and **`iv_k`** for a moment. TMA lands **128×64** **A** and **64×64** **B** in shared. For **`p1 = 0`**, **`ma`** sees rows **0…63** of **`lhs_load_s`**; for **`p1 = 1`**, **64…127**. For **both**, **`mb`** cycles **four** **K**-shards of **`rhs_load_s`**. After this **`iv_k`**, each **`mc`** holds the **partial** sum for **its** **64×64** **C** patch over **K** so far; the outer **`foreach {iv_k}`** runs until **K** is exhausted. **TMA** appears before the **`parallel p1 by 2`** nest on purpose: **shared** must hold the new **A** and **B** slabs before **`mma.load`**. Real code may use **async** TMA and **barriers**; the Choreo function still states **dependences** like a synchronous kernel. If you **pipeline** two **K** buffers, the **multi-warpgroup** split is unchanged: each **phase** still ends with **both** groups seeing **consistent** **`lhs_load_s`** and **`rhs_load_s`**.
 
 After **K**, each warpgroup still holds **its** **`mc`** in registers (or the lowering’s equivalent). A second **`parallel p1 by 2 : group-4`** stores each **`mc`** into **`output_s`** — flushing accumulators into shared before global writeback:
 
@@ -127,7 +127,7 @@ Nothing in the pattern is special to **two**. If hardware resources allow, you c
 
 **N-side** scaling is a **different** design fork. This chapter’s kernel keeps **`parallel p1`** strictly on the **M** split. If you also want **two** **64×64** patches **along N**, you typically introduce **another** parallel axis (or **another** **block** dimension) and **either** **replicate** or **partition** **B** accordingly — you **cannot** blindly keep a **single** **`rhs_load_s`** sized **`[64,64]`** if **each** group needs **disjoint** **N** data. The **M-only** split is the **sweet spot** for **one B tile** serving **many A row bundles**.
 
-If you generalize to **`MATMUL_TILE_M = 192`**, the tileflow changes only where **counts** and **buffer sizes** appear — the **pattern** is unchanged:
+If you generalize to **`MATMUL_TILE_M = 192`**, the Choreo function changes only where **counts** and **buffer sizes** appear — the **pattern** is unchanged:
 
 ```choreo
 shared f16 [192, MATMUL_TILE_K] lhs_load_s;

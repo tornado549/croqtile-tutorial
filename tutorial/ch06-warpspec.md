@@ -2,7 +2,7 @@
 
 Chapter 3’s double buffering interleaves producer and consumer work on the **same threads**: two named slots, a prologue, a steady-state loop with **`swap`**, and an epilogue. Warp specialization assigns those roles to **different warpgroups** so loads and math **truly overlap in time**, coordinated by **shared events** instead of swapping buffer aliases. The **1 producer + 1 consumer (1P1C)** kernel in **`matmul_f16_dyn_sm90_warpspec_1p1c.co`** is the canonical example.
 
-You still need **TMA** and **swizzle** from Chapter 4 and **WGMMA** with **`: group-4`** from Chapter 5. This chapter connects them with **shared events**, **`inthreads.async`**, **async TMA completion** wired to events, and **`mma.commit`**. The tileflow below matches the benchmark header:
+You still need **TMA** and **swizzle** from Chapter 4 and **WGMMA** with **`: group-4`** from Chapter 5. This chapter connects them with **shared events**, **`inthreads.async`**, **async TMA completion** wired to events, and **`mma.commit`**. The Choreo function below matches the benchmark header:
 
 - **`MATMUL_WARP_M = 64`**, **`MATMUL_WARP_N = 128`** — warpgroup output tile (WGMMA footprint along M and N).
 - **`MATMUL_TILE_K = 64`** — K depth of each staged slab in shared memory per pipeline stage.
@@ -41,9 +41,9 @@ In the **`swap(lf0, lf1)`** world, two names alias two buffers and you exchange 
 
 **`output_s`** is a single warpgroup-sized tile: the consumer accumulates the full K sweep into **`mc`**, **`mma.store`** once, then **`tma.copy`** to global. Only operand staging is multi-buffered.
 
-## Full tileflow: 1P1C matmul
+## Full Choreo function: 1P1C matmul
 
-Below is the **`__co__ void matmul`** body from **`matmul_f16_dyn_sm90_warpspec_1p1c.co`**, trimmed to tileflow (no host harness).
+Below is the **`__co__ void matmul`** body from **`matmul_f16_dyn_sm90_warpspec_1p1c.co`**, trimmed to the `__co__` body (no host harness).
 
 ```choreo
 __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, N] output) {
@@ -214,7 +214,7 @@ Relative to Chapters 3–5, the new vocabulary is **`inthreads.async (condition)
 
 For source and harness, open **`choreo/benchmark/performance/matmul/matmul_f16_dyn_sm90_warpspec_1p1c.co`**. The swap baseline lives in **`croktile-tutorial/tutorial/ch03-pipeline.md`**. For event semantics beyond this matmul, see **`croktile-tutorial/documentation/events.md`**.
 
-Chapter 7 (persistent kernels) and Chapter 8 (multi-warpgroup scaling) build on the same tileflow: you already know how to **fill**, **compute**, and **store**; warp specialization adds **which warpgroup** owns each phase and how credits move around the ring.
+Chapter 7 (persistent kernels) and Chapter 8 (multi-warpgroup scaling) build on the same Choreo function: you already know how to **fill**, **compute**, and **store**; warp specialization adds **which warpgroup** owns each phase and how credits move around the ring.
 
 If you want hands-on checks, compare wall-clock and TFLOPS against **`matmul_f16_dyn_sm90.co`** on the same **M, N, K** after you align timing flags — gains track problem size, memory bandwidth, and stage count, not a universal speedup.
 

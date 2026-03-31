@@ -2,7 +2,7 @@
 
 In Chapters 2 and 3, you moved data with **DMA** — explicit copies that software orchestrates tile by tile. That model is clear and portable, but on modern NVIDIA GPUs it leaves performance on the table. Starting with the **Hopper** architecture (compute capability 9.0, or **SM90**), NVIDIA added a dedicated hardware path for bulk, multi-dimensional loads and stores: the **Tensor Memory Accelerator**, or **TMA**.
 
-This chapter introduces TMA in Choreo, together with **swizzle** — a layout trick that keeps shared-memory accesses free of **bank conflicts** when tensor cores and wide loads expect a particular byte pattern. The running example is a real **FP16 matrix multiply** tileflow from the Choreo benchmark suite. MMA operations (`mma.load`, `mma.row.row`, and friends) appear here because they sit in the same loop as TMA; Chapter 5 unpacks tensor-core programming in depth.
+This chapter introduces TMA in Choreo, together with **swizzle** — a layout trick that keeps shared-memory accesses free of **bank conflicts** when tensor cores and wide loads expect a particular byte pattern. The running example is a real **FP16 matrix multiply** Choreo function from the benchmark suite. MMA operations (`mma.load`, `mma.row.row`, and friends) appear here because they sit in the same loop as TMA; Chapter 5 unpacks tensor-core programming in depth.
 
 ## From software copies to hardware tensor movement
 
@@ -18,9 +18,9 @@ The important idea: **`tma.copy.swiz<N>`** is not just a copy; it is **copy + ag
 
 In Chapters 2 and 3, **`dma.copy`** expressed the same intent — move a tile between memory kinds — but the generated path was software-driven (threads participating in the copy, possibly pipelined with `inthreads` and events). **`tma.copy`** is the Hopper-shaped spelling: the Choreo compiler maps it to TMA descriptors and instructions for SM90-family targets. You still think in terms of source fragment and destination buffer, but the mechanism is different. When a kernel uses **`mma.load.swiz`** and WGMMA-style **`parallel ... : group-4`**, pairing TMA loads with those intrinsics is the expected layout; swapping in generic DMA for the same SMEM buffers would break the assumptions the MMA side makes about byte-level placement. **DMA** teaches tiling and orchestration; **TMA** is the next gear when you commit to Hopper tensor pipelines.
 
-## Reference kernel: FP16 matmul tileflow (SM90)
+## Reference kernel: FP16 matmul Choreo function (SM90)
 
-The following is the tileflow core of the dynamic FP16 matrix multiply from the Choreo Hopper benchmark (`matmul_f16_dyn_sm90.co`). Compile-time constants:
+The following is the `__co__` core of the dynamic FP16 matrix multiply from the Choreo Hopper benchmark (`matmul_f16_dyn_sm90.co`). Compile-time constants:
 
 - `MATMUL_WARP_M = 64`, `MATMUL_WARP_N = 128`, `MATMUL_TILE_K = 64`, `MATMUL_WARP_K = 16`
 - `MATMUL_SWIZ = 128`

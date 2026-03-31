@@ -25,7 +25,7 @@ With a normal data-parallel grid, block count scales with **M/WM** and **N/WN**.
 At **2048³**, two small experiments already show SMEM and lowering matter:
 
 - **iter004**: WN=256, STAGES=2 → **208.9** TFLOPS. Fewer stages shrink the operand ring; footprint and residency move together.
-- **iter023**: adds **`ptx-barrier`**, **`stmatrix`**, and **subspan** work → **214.3** TFLOPS (~**+5%** over the Phase-1 baseline). That is compiler and operand-path quality on top of tileflow, not a new algorithm.
+- **iter023**: adds **`ptx-barrier`**, **`stmatrix`**, and **subspan** work → **214.3** TFLOPS (~**+5%** over the Phase-1 baseline). That is compiler and operand-path quality on top of the Choreo function, not a new algorithm.
 
 Phase 2 is where the profile story shifts: **iter046** hits **242** TFLOPS at **2048³** (WN=176, STAGES=2); **iter048** keeps **WN=176** but uses **three** stages and jumps to **354.1** TFLOPS. Same tile width, different stage count—that is the clearest log lesson that **pipeline depth must be tuned with** tile width **and** revisited when you change problem size. **iter050** then validates **1p2c split-output** at **4096³** (~**375** TFLOPS); **iter057** carries that to **382.5** TFLOPS at **8192³**. Once TFLOPS at 2048³ crosses **350+**, you are not arguing about “turning WGMMA on” anymore; you are arguing about occupancy, output staging, and the large-cube grid.
 

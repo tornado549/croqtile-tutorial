@@ -30,7 +30,7 @@ Reference kernels: `matmul_f16_dyn_sm90_warpspec_1p2c.co` and the shipped `*_ite
 
 ## Compiler flags and instruction-level overlap
 
-With tileflow structure settled, the last layer is how the compiler lowers it. The shipped builds share a common flag bundle:
+With Choreo function structure settled, the last layer is how the compiler lowers it. The shipped builds share a common flag bundle:
 
 - **`--use-warpspec`** — warp-specialized codegen for the producer/consumer split.
 - **`--stmatrix`** — STSM-style shared-memory matrix setup where legal.
@@ -52,7 +52,7 @@ The optimization followed a dependency chain, not a free-form search:
 3. **Phase 2** — jointly tune WN and STAGES, then move to 1p2c split-output → large jumps (354.1 at 2048³, ~375 at 4096³, 382.5 at 8192³).
 4. **Phase 3** — WN sweep at 8192³ with K-unroll and `wgmma-wait-depth` → 380.6 (iter061) and discovery of the WN=168 occupancy cliff.
 
-The study stayed inside dense FP16 GEMM with TMA-staged operands and WGMMA accumulation — no mixed precision, no split-K across CTAs, no CUDA Graph capture. The +83% came entirely from tileflow geometry, output staging, and compiler flags.
+The study stayed inside dense FP16 GEMM with TMA-staged operands and WGMMA accumulation — no mixed precision, no split-K across CTAs, no CUDA Graph capture. The +83% came entirely from Choreo function geometry, output staging, and compiler flags.
 
 The largest single structural win was not a flag — it was **1p2c split-output** moving TFLOPS into the 370–382 band. Flags like `--stmatrix` matter, but they cannot recover serialization on `output_s` if two consumers share one accumulator tile. When you face a similar ceiling in your own kernel, check whether the output path is the bottleneck before reaching for instruction-level levers.
 

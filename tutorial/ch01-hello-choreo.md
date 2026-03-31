@@ -4,29 +4,23 @@ In this chapter, you will write and run your very first Choreo program — a par
 
 ## What Choreo Does, in One Sentence
 
-Choreo is a C++ embedded DSL that lets you describe *how data moves* between memory levels on heterogeneous hardware (think: host RAM, GPU shared memory, local registers), while keeping your actual compute logic in plain C++ or CUDA. The Choreo compiler takes your description and transpiles it into efficient, target-specific code — so you focus on *what* to move and *where*, not on the low-level plumbing.
+Choreo is a C++ embedded DSL that lets you describe *how data moves* between memory levels on heterogeneous hardware (think: host RAM, GPU shared memory, local registers), while keeping your compute logic in the same language. The Choreo compiler takes your description and transpiles it into efficient, target-specific code — so you focus on *what* to move and *where*, not on the low-level plumbing. For a detailed treatment of every construct and its design rationale, see the [Coding Reference](../documentation/index.md).
 
-## The Three Parts of a Choreo Program
+## The Two Parts of a Choreo Program
 
-Every Choreo program has three parts. If you have written CUDA before, two of them will look familiar:
+Every Choreo program has two parts:
 
 1. **Host Program** — standard C++ running on the CPU. It prepares data, calls the Choreo function, and checks results.
-2. **Device Program** — the compute kernel running on the GPU (or other accelerator). This is where the actual arithmetic happens.
-3. **Tileflow Program** — the Choreo-specific part, marked with `__co__`. This is the *orchestrator*: it describes how data tiles are carved from inputs, moved to the device, handed to the compute kernel, and moved back.
+2. **Choreo Function** (`__co__`) — the Choreo-specific part, marked with the `__co__` prefix. It describes how data tiles are carved from inputs, moved between memory levels, computed on, and written back. Both data orchestration and arithmetic live inside this function.
 
-The key insight is that in traditional CUDA, you write one monolithic kernel that handles both data movement and computation. In Choreo, these concerns are separated. The tileflow program handles data movement; the device program handles computation. This separation makes the data orchestration explicit, composable, and much easier to optimize.
+In traditional CUDA, you write one monolithic kernel that handles both data movement and computation. In Choreo, the `__co__` function makes the data orchestration explicit, composable, and much easier to optimize. Compute happens inline — with `foreach` and `.at()` — right alongside the DMA operations that stage the data. You *can* also call external device functions with `call` when you want to reuse existing CUDA kernels, but that is an optional extension, not a required part.
 
 ## A Complete Example: Element-Wise Addition
 
 Look at the full program. It adds two `[6, 17, 128]` arrays of 32-bit integers element by element:
 
 ```choreo
-// Device Program
-__device__ void kernel(int * a, int * b, int * c, int n) {
-  for (int i = 0; i < n; ++i) c[i] = a[i] + b[i];
-}
-
-// Tileflow Program
+// Choreo Function
 __co__ s32 [6, 17, 128] ele_add(s32 [6, 17, 128] lhs, s32 [6, 17, 128] rhs) {
   s32 [lhs.span] output;
 
@@ -38,7 +32,8 @@ __co__ s32 [6, 17, 128] ele_add(s32 [6, 17, 128] lhs, s32 [6, 17, 128] rhs) {
 
         local s32 [lhs_load.span] l1_out;
 
-        call kernel(lhs_load.data, rhs_load.data, l1_out, |lhs_load.span|);
+        foreach i in [l1_out.span]
+          l1_out.at(i) = lhs_load.data.at(i) + rhs_load.data.at(i);
 
         dma.copy l1_out => output.chunkat(p, index);
       }
@@ -98,19 +93,7 @@ auto res = ele_add(choreo::make_spanview<3>(&a[0][0][0], {6, 17, 128}),
 
 The return value `res` is a `choreo::spanned_data`, which *owns* its buffer (unlike `spanned_view`, which just points at existing memory). You can index into it with `res[i][j][k]` and query its shape with `res.shape()`.
 
-## The Device Program: Just a Kernel
-
-```choreo
-__device__ void kernel(int * a, int * b, int * c, int n) {
-  for (int i = 0; i < n; ++i) c[i] = a[i] + b[i];
-}
-```
-
-This is a standard CUDA device function. It takes three pointers and a length, and adds the first two arrays into the third. Nothing about data movement — the tileflow program handles that.
-
-In Choreo programs, the device function operates on whatever data chunk the tileflow program has placed into local memory. It does not need to know the global shape, the tiling strategy, or the memory level it is reading from. This is the core of Choreo's separation of concerns.
-
-## The Tileflow Program: Line by Line
+## The Choreo Function: Line by Line
 
 This is the heart of the program. Here is a step-by-step walkthrough.
 
@@ -159,13 +142,13 @@ for (int x = 0; x < 17; x++)
 
 So each parallel thread runs 17 × 4 = 68 iterations.
 
-**DMA: Moving Data.**
+**DMA: moving data to local memory.**
 
 ```choreo
 lhs_load = dma.copy lhs.chunkat(p, index) => local;
 ```
 
-This is the DMA statement — the operation that actually moves data. Let's unpack it:
+This is the DMA statement — the operation that actually moves data:
 
 - `dma.copy` initiates a direct data transfer.
 - `lhs.chunkat(p, index)` is the *source*. The `chunkat` expression tiles `lhs` according to the parallel index `p` and loop index `index`. Since `lhs` has shape `[6, 17, 128]` and the tiling factors are `6`, `17`, and `4`, each chunk has size `1 × 1 × 32` (that is, `6/6`, `17/17`, `128/4`).
@@ -174,18 +157,16 @@ This is the DMA statement — the operation that actually moves data. Let's unpa
 
 The same pattern is used for `rhs`. After both DMA copies complete, the data chunk is available in local memory.
 
-**Calling the device kernel.**
+**Computing inline with `foreach` and `.at()`.**
 
 ```choreo
 local s32 [lhs_load.span] l1_out;
-call kernel(lhs_load.data, rhs_load.data, l1_out, |lhs_load.span|);
+
+foreach i in [l1_out.span]
+  l1_out.at(i) = lhs_load.data.at(i) + rhs_load.data.at(i);
 ```
 
-`local s32 [lhs_load.span] l1_out` allocates a local buffer for the output, with the same shape as the loaded chunk.
-
-The `call` statement invokes the device function `kernel`. Notice the accessors:
-- `lhs_load.data` extracts the raw pointer from the DMA future.
-- `|lhs_load.span|` computes the total number of elements in the chunk (the "span volume").
+`local s32 [lhs_load.span] l1_out` allocates a local buffer for the output, with the same shape as the loaded chunk. The `foreach i in [l1_out.span]` loop iterates over every element in that chunk, and `.at(i)` indexes into each position. The addition happens element by element — `lhs_load.data` and `rhs_load.data` extract the local spanned buffers from the DMA futures so you can read the staged data directly.
 
 **Storing results back.**
 
@@ -209,6 +190,6 @@ The `-es` flag stops after transpilation, letting you inspect the generated CUDA
 
 ## What You Have Learned
 
-In this chapter, you have seen the three-part structure of a Choreo program (host, device, and tileflow); the `__co__` prefix for Choreo functions, with typed, shaped inputs and outputs; `parallel ... by` for launching parallel execution; and `with ... in` and `foreach` for tiling loops. You have also seen how `dma.copy ... => ...` moves data between memory levels, how `chunkat` carves data into tiles based on parallel and loop indices, how `call` invokes device functions on local data, and how `make_spanview` connects host arrays to Choreo's type system.
+In this chapter, you have seen the two-part structure of a Choreo program (host and Choreo function); the `__co__` prefix for Choreo functions, with typed, shaped inputs and outputs; `parallel ... by` for launching parallel execution; and `with ... in` and `foreach` for tiling loops. You have also seen how `dma.copy ... => ...` moves data between memory levels, how `chunkat` carves data into tiles based on parallel and loop indices, how inline `foreach` and `.at()` compute on staged data, and how `make_spanview` connects host arrays to Choreo's type system.
 
 In the [next chapter](ch02-data-movement.md), we move from element-wise operations to matrix multiplication, and see how these same concepts apply to a more realistic kernel.
