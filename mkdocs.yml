@@ -1,0 +1,137 @@
+site_name: Croktile
+site_url: https://codes1gn.github.io/croktile-tutorial/
+docs_dir: docs
+
+repo_name: codes1gn/croktile-tutorial
+repo_url: https://github.com/codes1gn/croktile-tutorial
+
+theme:
+  name: material
+  favicon: assets/images/favicon.svg
+  logo: assets/images/favicon.svg
+  features:
+    - navigation.instant
+    - navigation.top
+    - navigation.sections
+    - navigation.expand
+    - navigation.path
+    - search.highlight
+    - search.suggest
+    - content.code.annotate
+    - content.code.copy
+    - toc.follow
+  palette:
+    - scheme: default
+      primary: green
+      accent: light green
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: green
+      accent: light green
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+extra_javascript:
+  - https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js
+  - https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js
+  - https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js
+  - assets/js/hljs-choreo.js
+  - assets/js/hljs-init.js
+
+extra_css:
+  - https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css
+  - assets/css/custom.css
+
+markdown_extensions:
+  - codehilite:
+      guess_lang: false
+      css_class: highlight
+  - toc:
+      permalink: true
+  - admonition
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+  - tables
+  - attr_list
+
+nav:
+  - Home: index.md
+
+  - Tutorial:
+    - Overview: tutorial/index.md
+    - "Ch 1: Hello Choreo": tutorial/ch01-hello-choreo.md
+    - "Ch 2: Data Movement Basics": tutorial/ch02-data-movement.md
+    - "Ch 3: Pipeline Patterns": tutorial/ch03-pipeline.md
+    - "Ch 4: TMA and Swizzle": tutorial/ch04-tma-swizzle.md
+    - "Ch 5: MMA Operations": tutorial/ch05-mma.md
+    - "Ch 6: Warp Specialization": tutorial/ch06-warpspec.md
+    - "Ch 7: Persistent Matmul": tutorial/ch07-persistent.md
+    - "Ch 8: Multi-Warpgroup": tutorial/ch08-multi-warpgroup.md
+    - "Ch 9: view/from": tutorial/ch09-view-from.md
+    - "Ch 10: C++ Inline & Macros": tutorial/ch10-cpp-inline-macros.md
+
+  - Performance Tuning Demos:
+    - Overview: optimization/index.md
+    - "Profiling Setup": optimization/setup-profiling.md
+    - "Dense GEMM FP16":
+      - Overview: optimization/matmul-f16/index.md
+      - Baseline Analysis: optimization/matmul-f16/baseline-analysis.md
+      - Pattern Optimizations: optimization/matmul-f16/pattern-optimizations.md
+      - AI-Tune Last Mile: optimization/matmul-f16/aitune-last-mile.md
+    - "Sparse GEMM (FP16 + E4M3)":
+      - Overview: optimization/gemm-sp/index.md
+      - Baseline Analysis: optimization/gemm-sp/baseline-analysis.md
+      - Pattern Optimizations: optimization/gemm-sp/pattern-optimizations.md
+      - AI-Tune Last Mile: optimization/gemm-sp/aitune-last-mile.md
+    - "Block-Scaled GEMM FP8":
+      - Overview: optimization/blockscale-gemm/index.md
+      - Baseline Analysis: optimization/blockscale-gemm/baseline-analysis.md
+      - Pattern Optimizations: optimization/blockscale-gemm/pattern-optimizations.md
+
+  - Coding Reference:
+    - Home: documentation/index.md
+    - What is Choreo: documentation/what-is-choreo.md
+    - "Program Structure":
+      - Choreo-C++ Program Structure: documentation/choreo-program-structure.md
+    - "Shaped Data":
+      - Shape and MDSpan: documentation/shape-in-choreo.md
+      - Integers and I-Tuples: documentation/integer-ituple.md
+      - Spanned Data and Buffers: documentation/spanned-data.md
+      - Dynamic Shape and Symbolic Dimension: documentation/symbolic-shape.md
+    - "Loop and Parallelism":
+      - About Parallelism and Iterations: documentation/intro-loop-parallel.md
+      - SPMD Parallelism: documentation/parallel-in-choreo.md
+      - Loop Control: documentation/within-loops.md
+    - "Data Movement":
+      - The DMA Statement: documentation/basic-dma.md
+      - Tile Data with ChunkAt: documentation/tiling-chunkat.md
+      - Advanced Data Movement: documentation/dma-in-advance.md
+    - "C++ Embeddings":
+      - Inputs and Output: documentation/input-output.md
+      - Macro and Preprocessing: documentation/macro-in-choreo.md
+    - "MPMD Programming":
+      - Thread Masking: documentation/thread-masking.md
+      - Events for Async Execution: documentation/events.md
+      - More on Async Execution: documentation/general-async.md
+    - "Advanced":
+      - Experimental Features: documentation/loop-in-advance.md
+    - "Optimisation Patterns":
+      - Tileflow Optimisations: documentation/tileflow-opt.md
+      - Async DMA Patterns: documentation/async-dma-patterns.md
+      - Multi-buffering Patterns: documentation/multi-buffering-patterns.md
+    - Reference Palette: documentation/operator-samples.md
+    - "Design Rationales":
+      - Syntax Design: documentation/syntax-design-of-choreo.md
+      - Why Symbolic Shapes: documentation/why-symbolic-shapes.md
+      - Symbolic Evaluation System: documentation/value-numbering.md
+      - Dynamism Support: documentation/dynamic-design.md
+
+  - Design Rationales: advanced/index.md
