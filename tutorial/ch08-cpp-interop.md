@@ -1,23 +1,26 @@
 # C++ Interop: Inline Code and the Preprocessor
 
-Croktile handles tiles, pipelines, and memory levels so you don't have to spell them in CUDA. Most of the time that is exactly right. But every so often you need something the DSL does not wrap: a specific PTX instruction, an early return guarding an empty segment, or a compile-time constant shared between the `__co__` body and host C++.
+So far the tutorial has built a stack of abstractions you can lean on every day: **tiles** and `parallel` grids carve the problem into blocks; **pipelines** and double-buffering hide latency along K; **MMA** paths express tensor-core math without hand-rolled PTX; and **events**, `swap`, and `wait`/`trigger` tie producer and consumer roles together without ad-hoc atomics. That is the Croktile you want to live in.
 
-This chapter covers the two escape hatches: **`__cpp__`**, which injects raw C++ verbatim into the generated output, and the **Croktile preprocessor** — `#define`, `#if`/`#ifdef`/`#else`/`#endif`, and `#error` — for macros and conditional compilation.
+Sometimes you still need to slip **below** the DSL — a single PTX instruction the compiler will not emit for you, a register-budget hint so warp-specialized roles coexist cleanly, or a compile-time constant that must match in both the `__co__` body and host-side C++. Those needs do not disappear just because the choreographed layer is expressive. This chapter is the **escape hatch**: when to drop into raw C++ or PTX, and the two mechanisms that make it safe and repeatable — **`__cpp__`** for verbatim injection, and the **Croktile preprocessor** (`#define`, `#if` / `#ifdef`, `#error`) for shared configuration and compile-time guards.
+
+The thread through the toolbox is one story: **`__cpp__` first** (what it is, how to use it, what trips people up), **register hints as the worked example**, then **the preprocessor** for tile macros and assertions, and finally **how to read a production `.co` file** top-down without getting lost.
+
+![Croktile kernel body with an embedded __cpp__ island for verbatim PTX/C++](../assets/images/ch08/fig1_escape_hatch_dark.png#only-dark)
+![Croktile kernel body with an embedded __cpp__ island for verbatim PTX/C++](../assets/images/ch08/fig1_escape_hatch_light.png#only-light)
 
 ## `__cpp__`: Verbatim C++ Injection
 
-`__cpp__` takes a string literal and pastes it, character for character, into the generated CUDA or C++ file. Whatever you put inside must be valid at the splice point — correct braces, semicolons, types, and scope.
+**What it does.** `__cpp__` takes a string literal and pastes it, character for character, into the generated CUDA or C++ file. Whatever you place there must be valid at the splice point: braces, semicolons, types, and scope must agree with the surrounding codegen. The Croktile compiler does not parse or rewrite the contents, and Croktile symbols are not magically visible inside the string — only names that actually appear in the generated output.
 
-Two forms:
+**Two forms.**
 
-- **`__cpp__("...")`** — ordinary string, good for short one-liners.
-- **`__cpp__(R"(...)")`** — raw string literal, ideal for `asm volatile("...")` and other quote-heavy fragments where escaping every `"` would be painful.
+- **`__cpp__("...")`** — Ordinary string; best for short one-liners and simple guards.
+- **`__cpp__(R"(...)")`** — Raw string literal; use this for `asm volatile("...")` and other fragments where escaping every `"` would be painful.
 
-The compiler does not parse or rewrite the contents. Croktile symbols are not visible inside the string — only names that exist in the generated C++ output.
+### Register hints: `setmaxnreg`
 
-## Register Hints: `setmaxnreg`
-
-The canonical use case. In warp-specialized pipelines (Chapter 5), the producer warpgroup needs few registers (it mostly issues TMA loads) while the consumer needs many (it holds MMA accumulators). NVIDIA's PTX `setmaxnreg` instruction redistributes the register budget between roles:
+The canonical `__cpp__` use case is **register redistribution** in warp-specialized pipelines ([Chapter 5](ch05-branch-control.md)). The producer warpgroup is register-light — it mostly issues TMA loads — while the consumer is register-heavy — it holds MMA accumulators. NVIDIA’s PTX `setmaxnreg` instruction moves the register budget between those roles:
 
 ```choreo
 parallel p1 by 2 : group-4 {
@@ -38,34 +41,65 @@ parallel p1 by 2 : group-4 {
 }
 ```
 
-The exact numbers (40, 216) are tuned per kernel. The `.dec`/`.inc` forms cooperate with the hardware register allocator so both roles can coexist without unnecessary spilling. Place the hint at the top of each `inthreads.async` branch, before the heavy loop.
+**`setmaxnreg.dec` / `setmaxnreg.inc`** — The exact counts (here 40 and 216) are tuned per kernel. The `.dec` and `.inc` forms cooperate with the hardware allocator so both roles can coexist without unnecessary spilling.
 
-## Early Returns and Guards
+**Placement** — Put the hint at the top of each `inthreads.async` branch, before the heavy loop, so the allocator sees the budget before the body runs.
 
-MoE-style GEMM kernels process variable-sized expert segments. Some launches may have zero width for a given expert. A one-line `__cpp__` injection avoids running the rest of the kernel on empty ranges:
+### Early returns and guards
+
+MoE-style GEMM kernels often process variable-sized expert segments; some launches have zero width for a given expert. A one-line `__cpp__` injection can bail out before the rest of the kernel runs:
 
 ```choreo
 __cpp__("if (seg_end - seg_start <= 0) return;\n\n");
 ```
 
-The variable names (`seg_end`, `seg_start`) must match what the surrounding generated code declares. If you rename a Croktile parameter and the codegen changes its output, stale `__cpp__` strings break at compile time — which is better than silently wrong results.
+**Name discipline** — The identifiers (`seg_end`, `seg_start`) must match what the surrounding generated code declares. If you rename a Croktile parameter and codegen changes its spelling, a stale `__cpp__` string fails at compile time — which is preferable to silently wrong results.
 
-## The Preprocessor: `#define` and Conditionals
+### Macros inside `__cpp__` strings
 
-Croktile's preprocessor runs before the main compiler pass. It understands:
+A common mistake is to assume the preprocessor will help inside the injected string:
+
+```choreo
+#define PRODUCER_MAXNREG 40
+
+inthreads.async (p1 == 0) {
+  __cpp__(R"(asm volatile("setmaxnreg.dec.sync.aligned.u32 PRODUCER_MAXNREG;");)");
+}
+```
+
+**Why it fails** — The preprocessor does not expand macros inside string literals. The generated asm would still contain the identifier `PRODUCER_MAXNREG`, not `40`, and PTX would reject it.
+
+**What teams do instead** — Type numeric literals inside `__cpp__` strings, and use `#if` / `#error` *outside* the strings to enforce consistency with your tile configuration:
+
+```choreo
+#define PRODUCER_MAXNREG 40
+#if PRODUCER_MAXNREG > 50
+#error "Producer maxnreg too high for this tile config"
+#endif
+
+inthreads.async (p1 == 0) {
+  __cpp__(R"(asm volatile("setmaxnreg.dec.sync.aligned.u32 40;");)");
+}
+```
+
+## The Preprocessor
+
+Croktile’s preprocessor runs before the main compiler pass. **`#define`**, **`#if` / `#elif` / `#else` / `#endif`**, **`#ifdef` / `#ifndef`**, and **`#error`** behave like their C counterparts. Macros expand in both `__co__` regions and host C++ in the same `.co` file, so one definition can keep tile geometry and host-side checks aligned.
+
+**Directive reference.**
 
 | Directive | Role |
 |-----------|------|
 | `#define NAME value` | Object-like macro: textual replacement |
 | `#if` / `#elif` / `#else` / `#endif` | Conditional inclusion |
-| `#ifdef` / `#ifndef` | Shorthand for "defined or not" |
-| `#error message` | Force a compile-time error with a message |
+| `#ifdef` / `#ifndef` | Shorthand for whether a macro is defined |
+| `#error message` | Force a compile-time failure with a message |
 
-Macros expand in both `__co__` regions and host C++ in the same `.co` file, so a single `#define` keeps tile geometry consistent across both worlds.
+**Limitation** — Function-like macros (`#define MAX(a, b) ...`) are not supported. Use `constexpr` helpers in ordinary C++ when you need parameterized expressions.
 
-## Tile Geometry as Macros
+### Tile geometry as macros
 
-Production matmul files centralize every tile dimension:
+Production matmul sources usually centralize every tile dimension at the top of the file:
 
 ```choreo
 #define MATMUL_WARP_M 64
@@ -75,13 +109,11 @@ Production matmul files centralize every tile dimension:
 #define MATMUL_STAGES 4
 ```
 
-These names appear in `parallel ... by [cdiv(M, MATMUL_WARP_M), ...]`, shared memory declarations, `foreach` bounds, and host-side verification. Change one define, and every use site updates.
+**Shared contract** — The same names appear in `parallel ... by [cdiv(M, MATMUL_WARP_M), ...]`, shared-memory declarations, `foreach` bounds, and host-side verification. Change one `#define`, and every use site updates together.
 
-**Limitation:** the preprocessor does not support function-like macros. `#define MAX(a, b) ...` will not expand with arguments. Use `constexpr` functions in plain C++ where you need parameterized expressions.
+### Compile-time assertions with `#error`
 
-## Compile-Time Assertions with `#error`
-
-Libraries pair `#if` with `#error` to enforce configuration constraints:
+Libraries often pair `#if` with `#error` so illegal combinations fail at compile time with a clear message:
 
 ```choreo
 #if MATMUL_SWIZ != (2 * MATMUL_TILE_K)
@@ -93,11 +125,11 @@ Libraries pair `#if` with `#error` to enforce configuration constraints:
 #endif
 ```
 
-When someone changes a swizzle width or warp tile incompatibly, the build fails immediately with a clear message instead of producing an illegal kernel. Treat `#error` guards as living documentation of hardware constraints.
+**Living documentation** — When someone changes swizzle width or warp tile incompatibly, the build stops immediately instead of emitting an illegal kernel. Treat these guards as documentation of hardware constraints, not one-off checks.
 
-## Conditional Code Paths
+### Conditional code paths
 
-Select entire regions based on a macro:
+You can select entire regions from a macro:
 
 ```choreo
 #define PATH0
@@ -112,49 +144,33 @@ __co__ foo() {
 }
 ```
 
-The preprocessor keeps one branch and discards the other before Croktile parses the `__co__` body. This is compile-time elimination, not a runtime `if` — no dead code in the generated program.
+**Compile-time elimination** — The preprocessor keeps one branch and discards the other before Croktile parses the `__co__` body. This is not a runtime `if`; the discarded branch never appears in the generated program.
 
-You can also drive variants from the command line: `croktile kernel.co -DMATMUL_TILE_K=128` overrides or defines macros without editing the source. This is how benchmark suites sweep over tile sizes without duplicating files.
-
-## Macros Inside `__cpp__` Strings
-
-A tempting mistake:
-
-```choreo
-#define PRODUCER_MAXNREG 40
-
-inthreads.async (p1 == 0) {
-  __cpp__(R"(asm volatile("setmaxnreg.dec.sync.aligned.u32 PRODUCER_MAXNREG;");)");
-}
-```
-
-This does **not** work. The preprocessor does not expand macros inside string literals — the generated asm will contain the identifier `PRODUCER_MAXNREG`, not the number `40`, and PTX will reject it.
-
-In practice, teams type numeric literals inside `__cpp__` strings and use `#if`/`#error` guards outside the strings to enforce consistency:
-
-```choreo
-#define PRODUCER_MAXNREG 40
-#if PRODUCER_MAXNREG > 50
-#error "Producer maxnreg too high for this tile config"
-#endif
-
-inthreads.async (p1 == 0) {
-  __cpp__(R"(asm volatile("setmaxnreg.dec.sync.aligned.u32 40;");)");
-}
-```
+**Command-line defines** — `croktile kernel.co -DMATMUL_TILE_K=128` defines or overrides macros without editing the source — useful for benchmark sweeps over tile sizes without duplicating files.
 
 ## Reading a Production `.co` File
 
-When you open a benchmark kernel like `blockscale_gemm_e4m3_dyn_sm90_warpspec_1p1c.co`, read top down:
+When you open a benchmark kernel such as `blockscale_gemm_e4m3_dyn_sm90_warpspec_1p1c.co`, read **top down**:
 
-1. **Macros and `#error` guards** — the contract: allowed tile sizes, swizzle rules, architecture flags.
-2. **Host setup** — buffers, launch config, timing; ordinary C++.
-3. **The `__co__` function** — orchestration: `parallel`, `foreach`, TMA/MMA, `inthreads.async`, events. Map each region back to earlier chapters.
-4. **`__cpp__` islands** — usually a handful of lines. Pause on each and identify what the hardware gets that the DSL does not spell.
+1. **Macros and `#error` guards** — The contract: allowed tile sizes, swizzle rules, architecture flags.
+2. **Host setup** — Buffers, launch configuration, timing; ordinary C++.
+3. **The `__co__` function** — Orchestration: `parallel`, `foreach`, TMA/MMA, `inthreads.async`, events. Map each region back to earlier chapters.
+4. **`__cpp__` islands** — Usually a handful of lines. Pause on each and ask what the hardware receives that the DSL does not spell.
 
-That order prevents getting lost in a warp-specialized loop before you know which constants you can change.
+That order keeps you from diving into a warp-specialized loop before you know which constants you are allowed to change.
 
-## New Syntax
+## Chapter Summary
+
+| Topic | Takeaway |
+|-------|----------|
+| When to escape | PTX instructions, register hints, host/device constants, guards — use the DSL everywhere it fits; drop down sparingly. |
+| `__cpp__` | Verbatim paste into generated CUDA; raw strings for `asm`; names must match generated C++. |
+| `setmaxnreg` | Canonical example: dec on producer, inc on consumer; tune per kernel; place before heavy loops. |
+| Guards / macros in strings | Early `return` via `__cpp__`; macros do **not** expand inside string literals — use literals + `#error` outside. |
+| Preprocessor | `#define` for tile geometry; `#if` / `#error` for constraints; `#ifdef` for variants; `-D` for sweeps. |
+| Reading `.co` files | Macros first, then host, then `__co__`, then `__cpp__` islands. |
+
+**New syntax**
 
 | Syntax | Meaning |
 |--------|---------|
@@ -165,6 +181,6 @@ That order prevents getting lost in a warp-specialized loop before you know whic
 | `#ifdef NAME` / `#ifndef NAME` | Test whether a macro is defined |
 | `#error "message"` | Compile-time assertion failure |
 
-These escape hatches close the loop: Croktile keeps everyday kernels readable and structured, while `__cpp__` and the preprocessor handle the hardware-specific details that sit below the DSL's abstraction level. Use them sparingly — one PTX hint, one guard, one pragma — and let the Croktile function own everything else.
+The escape hatches close the loop: Croktile keeps everyday kernels readable and structured, while `__cpp__` and the preprocessor handle the hardware-specific details that sit below the abstraction. Prefer a single PTX hint, a single guard, or a single pragma over scattering raw islands through the program — let the `__co__` function own the story.
 
-The [next chapter](ch09-debug-verbose.md) covers the other side of the workflow: what to do when your kernel compiles but produces wrong results.
+The [next chapter](ch09-debug-verbose.md) turns to the other side of the workflow: what to do when the kernel compiles but the output is wrong — debugging, verbose modes, and systematic narrowing.

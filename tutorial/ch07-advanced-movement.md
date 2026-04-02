@@ -1,50 +1,57 @@
 # Advanced Data Movement: TMA, Swizzle, and Irregular Access
 
-Every data movement so far has used `dma.copy` — a software-driven transfer where threads construct addresses, issue loads, and shuffle bytes into shared memory. On Hopper (SM90), NVIDIA added a dedicated hardware unit for this job: the **Tensor Memory Accelerator (TMA)**. TMA handles address computation, layout translation, and multi-dimensional tiling in hardware, freeing the producer warpgroup to do other work (or not exist at all).
+Chapter 6 closed the loop on **safe pipelining**: producers issue `dma.copy` into shared-memory stages, consumers wait on **events**, and the K-tile loop overlaps loads with MMA while **double- or multi-buffering** keeps each phase from stepping on the other. Every one of those transfers was **software-driven**: warps cooperated, each lane helped compute addresses, and the program issued loads the way ordinary CUDA does—just expressed more cleanly in Croktile.
 
-This chapter replaces `dma.copy` with `tma.copy` and introduces **swizzle modes** that rearrange shared-memory layout to avoid bank conflicts. It also covers the data-access tools for kernels whose tiles are not perfectly regular grids: **`view`/`from`** for arbitrary-offset windows, **`.subspan`/`.step`/`.at`** for strided access, **`.zfill`** for out-of-bounds padding, and **`span_as`** for layout reinterpretation.
+This chapter stays on one thread—**advanced data movement**—but changes the mechanism. **`dma.copy`** is still the right mental model for older GPUs and for stores that remain DMA-sized, but on **Hopper (SM90)** you will usually replace ingress with **`tma.copy`**. The **Tensor Memory Accelerator (TMA)** is a dedicated unit that accepts a **tensor descriptor** and performs multi-dimensional tile movement with **negligible thread work**, instead of burning warps on address arithmetic. Alongside TMA, **swizzle** rearranges how columns land in shared memory so a warp’s simultaneous accesses do not all map to the **same 4-byte bank**—the root of **bank conflicts**, where the hardware serializes what should have been a parallel read. Finally, Croktile’s **`view` / `from`**, **strided `subspan`**, **`.zfill`**, and **`span_as`** cover **irregular and ragged** access when tiles are not neat multiples of the tensor or when windows start at arbitrary offsets.
+
+![Software DMA vs TMA: cooperative thread loads vs descriptor-driven hardware tensor copy](../assets/images/ch07/fig1_tma_vs_dma_dark.png#only-dark)
+![Software DMA vs TMA: cooperative thread loads vs descriptor-driven hardware tensor copy](../assets/images/ch07/fig1_tma_vs_dma_light.png#only-light)
 
 ## `tma.copy`: Hardware Tensor Movement
 
-The syntax looks almost identical to `dma.copy`:
+The surface syntax mirrors `dma.copy`:
 
 ```choreo
 tma.copy lhs.subspan(WARP_M, TILE_K).at(block_m, iv_k) => lhs_load_s;
 ```
 
-Same source expression, same `=> destination` form. But the semantics differ:
+**Same arrow, new engine.** The line looks like `dma.copy`, but the work shifts from **software** to **hardware** as follows.
 
-- **No thread cooperation needed.** DMA requires threads to collectively load a tile (each thread loads its portion). TMA issues a single descriptor-based copy from one thread (or even from the hardware pipeline itself).
-- **Multi-dimensional addressing.** TMA understands tensor layouts natively — it translates the `.subspan(...).at(...)` expression into a hardware descriptor without generating per-element address arithmetic.
-- **Bulk completion.** TMA commits an entire tile atomically; you synchronize on the whole tile, not individual elements.
+Same **source expression**, same **`=>` destination** form. The difference is **who does the work**:
 
-The tradeoff is that TMA requires a **tensor descriptor** on the host side, which the compiler generates from the `__co__` function signature. For most kernels, this is invisible — the compiler handles it and you write `tma.copy` where you would have written `dma.copy`.
+- **DMA path.** Threads **cooperate** to cover the tile; each lane participates in **address math** and load issue. Throughput scales with how well you keep those loads **bank-friendly**—often a fight on its own.
+- **TMA path.** One logical **descriptor-based** operation describes the tensor slice; the **TMA** expands that into the correct **multi-dimensional** addressing and moves the **whole tile** as a unit. Producer warps can **overlap** other work or disappear into a thinner launch pattern because the **hardware**, not a full warp’s worth of threads, owns the transfer semantics.
 
-## Swizzle Modes
+**What this buys you.** You still **synchronize** on the **whole tile** (with events or the same pipeline discipline as Chapter 6), but you drop the **per-thread** load choreography for operand ingress. The compiler builds the **tensor descriptor** from your `__co__` signature and global layouts; in typical kernels you only write `tma.copy` where you once wrote `dma.copy`.
 
-Shared memory on NVIDIA GPUs is divided into **banks** — 32 banks, each 4 bytes wide. When multiple threads in a warp access different addresses that map to the same bank, the accesses are serialized: a **bank conflict**. In a dense tile load where thread `t` reads column `t`, the access pattern often creates 2-way or 4-way conflicts that halve or quarter effective bandwidth.
+## Swizzle and Bank Conflicts
 
-**Swizzle** rearranges the column indices within each row so that threads accessing consecutive columns hit different banks. Croktile's notation:
+Shared memory is **striped into banks** (32 banks, 4 bytes per bank on common paths). When **multiple lanes in a warp** touch **different addresses that map to the same bank** in the same cycle, the hardware **serializes** those accesses—a **bank conflict**. Dense **row-major** tiles often put **consecutive columns** where a warp’s consecutive lanes want them, which can create **2-way, 4-way, or worse** conflicts and **cut effective bandwidth** sharply.
+
+**Swizzle** applies a **fixed XOR-style remapping** to column indices within each row so that the layout threads **actually read** spreads accesses across banks. Croktile exposes it on the copy and on the MMA load so **ingress and math agree**:
 
 ```choreo
 tma.copy.swiz<3> src => dst;
 ```
 
-The `<3>` parameter controls the swizzle granularity: `swiz<0>` is no swizzle, `swiz<1>` is 64-byte, `swiz<2>` is 128-byte, and `swiz<3>` is 256-byte XOR-based remapping. Larger granularity eliminates conflicts over wider access patterns but requires the tile shape to be a multiple of the granularity.
-
-When you load operands with swizzled layout, you must read them back with the **matching** swizzle mode:
+**Ingress.** The copy lands bytes in shared memory using swizzle pattern **`N`**.
 
 ```choreo
 ma = mma.load.swiz<3> lhs_load_s.chunkat(_, iv_warp);
 ```
 
-`mma.load.swiz<3>` tells the MMA operand load that the data in shared memory was laid out with `swiz<3>` XOR pattern. Using `mma.load` (unswizzled) on `swiz<3>` data reads garbage — the addresses don't match.
+**MMA read path.** Operand loads must use the **same** **`swiz<N>`** so addresses match the staged layout.
 
-**Consistent swizzle rule:** the `<N>` parameter on `tma.copy.swiz<N>` must equal the `<N>` on `mma.load.swiz<N>`. The compiler does not enforce this — it is a correctness invariant you maintain.
+**Swizzle levels.** The template argument sets the **granularity**: `swiz<0>` is identity, then **64 B, 128 B, and 256 B** XOR patterns for `<1>`, `<2>`, and `<3>`. Larger granularities defeat **wider** conflict patterns but require **tile extents** that line up with that granularity.
+
+**Matching rule.** The `<N>` on **`tma.copy.swiz<N>`** must match **`mma.load.swiz<N>`**. If you load with plain `mma.load` from **`swiz<3>`** data, addresses disagree and you read **garbage**. The compiler does **not** enforce the pairing—it is a **correctness invariant** you maintain.
+
+![Bank conflicts without swizzle vs XOR swizzle spreading warp lanes across banks](../assets/images/ch07/fig2_swizzle_dark.png#only-dark)
+![Bank conflicts without swizzle vs XOR swizzle spreading warp lanes across banks](../assets/images/ch07/fig2_swizzle_light.png#only-light)
 
 ## TMA in a Pipelined Matmul
 
-Here is a Hopper FP16 matmul using TMA for loads and swizzled shared memory. It builds on the 1P1C pipeline from Chapter 6:
+The pipeline **skeleton** from Chapter 6 is unchanged: **ring of stages**, **`wait` / `trigger` on events**, **MMA commit**, and a **consumer** that drains tiles while a **producer** fills the next slot. Here the producer swaps **`dma.copy`** for **`tma.copy.swiz<3>`** and the consumer swaps **`mma.load`** for **`mma.load.swiz<3>`** on the staged buffers. The example below is a **Hopper FP16** matmul with the same **1P1C** split (`parallel p1 by 2 : group-4`) you have seen before:
 
 ```choreo
 __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, N] output) {
@@ -90,93 +97,11 @@ __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, 
 }
 ```
 
-Compared to Chapter 6's `dma.copy` version, the producer replaces `dma.copy ... =>` with `tma.copy.swiz<3> ... =>`, and the consumer replaces `mma.load` with `mma.load.swiz<3>`. The pipeline structure — events, ring buffer, commit — is unchanged. TMA + swizzle is a drop-in for DMA that eliminates per-thread address math and bank conflicts.
+**Pipeline parity.** Compared to the Chapter 6 **`dma.copy`** version, only the **ingress** and **operand load** lines change; **events**, **staging indices**, and **commit** stay the same. **TMA** removes cooperative **per-thread** address work on the loads; **swizzle** aligns shared layout with **MMA** access patterns. The **writeback** to global memory still uses **`dma.copy`** here—choose TMA or DMA for stores according to your target and compiler support.
 
-## `view` and `from`: Arbitrary-Offset Windows
+### Aside: `parallel.async` and `stream s`
 
-All examples so far tile along aligned boundaries: `chunkat(i)` picks the i-th equal chunk, `subspan(M, K).at(block_m, iv_k)` picks a tile at position `(block_m, iv_k)`. But some kernels need a window that starts at an arbitrary offset, not necessarily a tile-aligned position.
-
-`view(M, N).from(row, col)` creates a rectangular view of size `M × N` starting at position `(row, col)`:
-
-```choreo
-patch = matrix.view(16, 16).from(37, 50);
-```
-
-This gives you a `[16, 16]` window into `matrix` starting at row 37, column 50 — no alignment requirement. If `(37 + 16)` exceeds the matrix height, you are reading out of bounds unless you use `.zfill`.
-
-The distinction matters: `chunkat` requires the tensor to be evenly divisible by the tile count; `view().from()` does not. Use `chunkat` for uniform tiling, `view().from()` for ragged or offset access.
-
-A real use case: **Mixture-of-Experts (MoE) GEMM**, where each expert processes a different number of tokens. The expert's slice of the input matrix starts at an offset determined at runtime, not at a tile boundary:
-
-```choreo
-expert_lhs = lhs.view(expert_M, K).from(expert_offset, 0);
-dma.copy expert_lhs.subspan(WARP_M, TILE_K).at(block_m, iv_k) => shared;
-```
-
-Here `expert_offset` is a runtime value — the starting row of expert `e`'s token batch. `view().from()` cuts a dynamically positioned window before the rest of the pipeline (DMA, MMA, events) runs unchanged.
-
-## `.subspan`, `.step`, `.at`: Strided Tile Access
-
-You have already seen `subspan(M, K).at(i, j)` — define a tile extent and select by tile index. Adding `.step` introduces a stride between tiles:
-
-```choreo
-matrix.subspan(16, 16).step(32, 32).at(i, j)
-```
-
-This selects tiles of size `[16, 16]`, but **separated by 32 rows and 32 columns** instead of being packed contiguously. Tile `(0, 0)` starts at `(0, 0)`, tile `(1, 0)` starts at `(32, 0)`, tile `(0, 1)` starts at `(0, 32)`. The `.step` controls how far apart tiles are in each dimension.
-
-Without `.step`, tiles are packed: the step equals the tile size. `.step` is useful when:
-
-- **You skip over padding or guard bands** between tiles.
-- **Tiles have overlap** (step smaller than extent), as in stencil or convolution patterns.
-- **Tiles are strided along an outer dimension** for memory layout reasons.
-
-## `.zfill`: Zero-Padding Out-of-Bounds Tiles
-
-When the tensor dimensions are not multiples of the tile size, the last tile along each axis is **partial** — it extends past the tensor boundary. Reading past the end is undefined behavior in CUDA.
-
-`.zfill` tells the DMA or TMA copy to fill out-of-bounds elements with zero instead of reading garbage:
-
-```choreo
-tma.copy.swiz<3> lhs.subspan(WARP_M, TILE_K).at(block_m, iv_k).zfill
-  => lhs_load_s;
-```
-
-The `.zfill` modifier goes after the source expression. The hardware (or the generated code for DMA) checks which elements of the requested tile fall outside the tensor and writes zero for those elements, leaving the valid elements unchanged. The MMA loop proceeds as normal — the zeros contribute nothing to the accumulation, which is the correct behavior for partial tiles in GEMM.
-
-## `mma.row.row.scale`: Block Dequantization
-
-Chapter 4 introduced `mma.row.row mc, ma, mb` for FP16 × FP16. When working with **FP8** formats (`f8_e4m3` or `f8_e5m2`), the accumulation is in FP32 but the operands lack dynamic range. Block-scaled quantization stores one scaling factor per tile:
-
-```choreo
-mma.row.row.scale mc, ma, mb, sc_a, sc_b;
-```
-
-After the matrix multiply, each element of `mc` is multiplied by the corresponding scale factors `sc_a` and `sc_b`. This fuses dequantization into the MMA instruction — no separate pass needed.
-
-The scale factors `sc_a` and `sc_b` are loaded alongside operands A and B, typically from a separate metadata tensor. The compiler handles the broadcast from per-tile scale to per-element result.
-
-## `span_as`: Layout Reinterpretation
-
-Sometimes the same buffer needs to appear with different logical shapes at different points. `span_as` reinterprets the layout without copying:
-
-```choreo
-flat_buffer.span_as([rows, cols])
-```
-
-This treats the underlying storage of `flat_buffer` as a 2D tensor of shape `[rows, cols]`. The element count must match — `rows * cols == flat_buffer.span(0)` — or the compiler will reject it.
-
-A common pattern: loading a 1D strip from global memory and then reinterpreting it as a 2D tile for MMA:
-
-```choreo
-strip_load = dma.copy data.chunkat(tile) => shared;
-tile_2d = strip_load.data.span_as([tile_m, tile_k]);
-ma = mma.load tile_2d.chunkat(_, iv_warp);
-```
-
-## `parallel.async` and `stream s`
-
-For fire-and-forget kernel launches, Croktile provides:
+Host-side launch policy is **orthogonal** to TMA versus DMA. For **non-blocking** grid launches, Croktile allows:
 
 ```choreo
 parallel.async {px, py} by [grid_m, grid_n] : block {
@@ -185,23 +110,101 @@ parallel.async {px, py} by [grid_m, grid_n] : block {
 }
 ```
 
-`parallel.async` launches the grid without blocking the host. The `stream s` directive assigns the launch to a CUDA stream; multiple `parallel.async` blocks on different streams run concurrently. This is the Croktile equivalent of launching a kernel on a non-default stream.
+**Host streams, not tensor paths.** **`parallel.async`** returns without waiting for the kernel to finish; **`stream s`** pins the body to a **CUDA stream** so multiple async blocks can run **concurrently**. Treat this as **host orchestration**—it does not replace **in-kernel** `tma.copy` or **swizzle** decisions.
 
-## New Syntax
+## Handling Irregular Access
+
+Uniform tiling with **`chunkat`** and **`subspan(...).at(...)`** covers many kernels. Real workloads also need **windows at arbitrary offsets**, **strides between tiles**, **partial tiles** at boundaries, and **layout reinterpretation**—the subsections below collect those tools under one heading.
+
+### Arbitrary-offset windows: `view` and `from`
+
+**`view(M, N).from(row, col)`** defines an **`M × N`** rectangle starting at **`(row, col)`** in the underlying tensor—**no** requirement that the origin aligns to a precomputed tile grid.
+
+```choreo
+patch = matrix.view(16, 16).from(37, 50);
+```
+
+**Fixed window, free origin.** This is a **`[16, 16]`** slice starting at row **`37`**, column **`50`**—alignment is **not** required (use **`.zfill`** if the window crosses the tensor edge).
+
+**When to use it.** **`chunkat`** needs the tensor divided evenly into a fixed number of chunks; **`view(...).from(...)`** does not. Prefer **`chunkat`** for **regular** tiling and **`view` / `from`** when the window is **ragged** or **runtime-positioned**.
+
+```choreo
+expert_lhs = lhs.view(expert_M, K).from(expert_offset, 0);
+dma.copy expert_lhs.subspan(WARP_M, TILE_K).at(block_m, iv_k) => shared;
+```
+
+**MoE-style GEMM.** In **mixture-of-experts** stacks, each expert’s token batch often starts at a **dynamic row** `expert_offset`. Slicing with **`view` / `from`** rewires the operand **before** the rest of the pipeline—DMA or TMA, MMA, events—**unchanged**.
+
+### Strided tiles: `.subspan`, `.step`, and `.at`
+
+**`subspan(M, K).at(i, j)`** selects the tile anchored at logical tile indices **`(i, j)`** with extent **`[M, K]`**. Adding **`.step(sM, sK)`** spaces tiles **`sM`** rows and **`sK`** columns apart instead of packing them contiguously:
+
+```choreo
+matrix.subspan(16, 16).step(32, 32).at(i, j);
+```
+
+**Strided tiling.** Neighboring tile indices advance by **`(sM, sK)`** in **global** coordinates, not necessarily by the tile size.
+
+**What `.step` means.** Tile **`(0, 0)`** still starts at **`(0, 0)`**, but tile **`(1, 0)`** starts at **`(32, 0)`** and **`(0, 1)`** at **`(0, 32)`**. Omitting **`.step`** uses a step equal to the **tile size** along each axis—the **packed** case.
+
+**Typical uses:** skipping **padding or guard bands**, **overlapping** stencils where the step is **smaller** than the extent, or matching an **outer layout** that is not dense tile-major.
+
+### Zero-padding: `.zfill`
+
+When **`M` or `K`** is **not** a multiple of the tile size, the **last** tile along an axis is **partial**. Reading past the tensor’s edge is **undefined** unless you explicitly **pad**.
+
+```choreo
+tma.copy.swiz<3> lhs.subspan(WARP_M, TILE_K).at(block_m, iv_k).zfill
+  => lhs_load_s;
+```
+
+**Semantics.** **`.zfill`** applies to the **source** side of a copy: out-of-range elements are **written as zero** in the destination tile. Zeros **contribute nothing** to a GEMM accumulation, so the **MMA loop** can stay **uniform** while remaining **mathematically** correct for **partial** edges.
+
+### Layout reinterpretation: `span_as`
+
+**`span_as`** **reinterprets** a buffer’s linear storage as another **shape** with the **same element count**—**no** copy.
+
+```choreo
+flat_buffer.span_as([rows, cols])
+```
+
+**View-only reshape.** Element count is preserved; only the **logical** rank changes.
+
+```choreo
+strip_load = dma.copy data.chunkat(tile) => shared;
+tile_2d = strip_load.data.span_as([tile_m, tile_k]);
+ma = mma.load tile_2d.chunkat(_, iv_warp);
+```
+
+**1D staging to 2D MMA.** **`span_as`** exposes the loaded strip as a **matrix** for **`chunkat`** without an extra copy.
+
+**Contract.** **`rows * cols`** must equal the **span length** of the underlying storage or the compiler **rejects** the program.
+
+## Chapter Summary
+
+| Idea | Role in the “advanced movement” story |
+|------|--------------------------------------|
+| **`dma.copy` (Ch. 6)** | Software-driven pipelined loads—threads + address math; baseline for comparison. |
+| **`tma.copy` / `tma.copy.swiz<N>`** | Descriptor-driven **Hopper** ingress; hardware **multi-dimensional** tile fetch with **minimal thread overhead**. |
+| **Swizzle + `mma.load.swiz<N>`** | Align **shared layout** with **MMA** reads; avoid **bank conflicts** via **XOR** remapping—**matching** `N` on copy and load. |
+| **`view` / `from`** | **Arbitrary-offset** rectangular windows for **ragged** or **runtime** slice origins. |
+| **`.subspan(...).step(...).at(...)`** | **Strided** tiling—overlap, padding skips, or non-packed layouts. |
+| **`.zfill`** | **Safe partial tiles** by zero-filling out-of-bounds elements on copy. |
+| **`span_as`** | **Zero-copy** shape **reinterpretation** for staging buffers. |
+| **`parallel.async` / `stream s`** | **Host-side** async launch and **stream** selection—**not** a substitute for TMA or swizzle. |
+
+## New Syntax (quick reference)
 
 | Syntax | Meaning |
 |--------|---------|
-| `tma.copy src => dst` | TMA hardware-accelerated tensor copy |
-| `tma.copy.swiz<N> src => dst` | TMA copy with swizzle mode (0–3) |
-| `mma.load.swiz<N> src` | MMA operand load matching swizzle mode |
-| `tensor.view(M, N).from(r, c)` | Arbitrary-offset rectangular window |
-| `.subspan(M, K).step(sM, sK).at(i, j)` | Strided tile access with explicit step |
-| `.zfill` | Zero-fill out-of-bounds elements on copy |
-| `mma.row.row.scale mc, ma, mb, sc_a, sc_b` | MMA with per-tile block dequantization |
-| `span_as([dims])` | Reinterpret layout without copying |
-| `parallel.async ... : block` | Non-blocking (async) grid launch |
-| `stream s` | Assign kernel body to a CUDA stream |
+| `tma.copy src => dst` | TMA hardware tensor copy |
+| `tma.copy.swiz<N> src => dst` | TMA copy with swizzle mode `N` (0–3) |
+| `mma.load.swiz<N> src` | MMA operand load consistent with swizzle `N` |
+| `tensor.view(M, N).from(r, c)` | Arbitrary-offset `M × N` window |
+| `.subspan(M, K).step(sM, sK).at(i, j)` | Strided tile selection |
+| `.zfill` | Zero-fill out-of-bounds elements on the copy source |
+| `span_as([dims])` | Reinterpret linear storage as a shaped tensor |
+| `parallel.async ... : block` | Non-blocking async kernel launch |
+| `stream s` | Bind the kernel body to CUDA stream `s` |
 
-With TMA and swizzle, the memory pipeline runs faster and the code is shorter — no per-thread address arithmetic, no manual bank-conflict avoidance. `view`/`from` and `.zfill` handle the messy edges of real workloads where tiles do not divide evenly and inputs are not aligned.
-
-The [next chapter](ch08-cpp-interop.md) leaves Croktile's high-level abstractions and shows how to drop into raw C++ when you need to — register hints, preprocessor guards, and inline PTX.
+The [next chapter](ch08-cpp-interop.md) steps past pure Croktile choreography into **C++ interop**: **register hints**, **preprocessor guards**, and **inline PTX** when you need to **drop down** to the metal beside generated code.

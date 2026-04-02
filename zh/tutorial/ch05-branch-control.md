@@ -1,14 +1,24 @@
-# 分支与控制：Warp 角色与持久内核
+# Warp 特化与控制流
 
-迄今为止，块内每个线程执行相同的代码：加载相同的 tile、执行相同的 MMA、写回相同的结果。这种一致性清晰，但代价是：张量核心忙于乘法时，存储系统本可预取下一块 tile——却无人发起，因为每个线程都卡在 `mma.row.row` 指令上。
+第 4 章在 Hopper 上走通了 MMA 生命周期：从共享内存 `mma.load`、`mma.row.row` 在张量核心上运算、寄存器累加，再到 `mma.store` 与 `dma.copy` 写回全局内存。该流水线有效，但它存在结构性局限：张量核心忙于乘法时，内存子系统往往空闲，因为 block 内每条线程执行同一内核体。没有剩余线程在 MMA 执行期间发起下一批 bulk load。
 
-本章介绍两种有意打破该一致性的控制流。**warp 特化**（`inthreads.async`）为不同的 warpgroup 分配不同角色——一部分加载数据，另一部分计算。**条件守卫**（`if`）在 tile 索引越界时跳过工作，这对在可变数量的 tile 上运行固定块池的**持久内核**至关重要。
+真实流水线并非如此均匀：生产者加载数据，消费者将其转化为运算。在 CPU 上可能用线程与队列；在 GPU 上，经典 CUDA 做法是保留单一内核并辅以谨慎同步，使不同 warp 扮演不同角色。鳄霸（Croktile）将这一划分变为**结构性**的：`inthreads.async` 为不同 warpgroup 指派不同的直线型程序，硬件从而可在不令每条线程同时执行两条路径的前提下重叠 DMA 与 MMA。当调度本身需要判断——例如跳过问题末尾之外的 tile——则使用普通的 **`if`**，它是**运行时**分支，而非角色划分。
 
-## `inthreads.async`：划分角色
+本章只有一条主线：如何赋予 warpgroup 不同任务，以及何时用条件语句保护工作。后半部分介绍**持久化内核（persistent kernel）**：固定大小的 block 池在多个输出 tile 上条带化遍历，并用 `if` 防止越界写。
 
-`inthreads.async (condition)` 的含义是：「仅当 `condition` 为真时，对应线程才执行该代码块。」它并非运行时上每个线程都求值、部分跳过的分支，而是一种**结构性划分**，会生成两套（或更多）各自直线式的程序，每种角色一套，可在不同硬件单元上并发执行。
+![1P1C 时间线：生产者 DMA 与消费者 MMA 在同一时间轴上重叠](../assets/images/ch05/fig1_role_split_dark.png#only-dark)
+![1P1C 时间线：生产者 DMA 与消费者 MMA 在同一时间轴上重叠](../assets/images/ch05/fig1_role_split_light.png#only-light)
 
-典型模式是 **1 生产者 + 1 消费者（1P1C）** 矩阵乘法：
+## `inthreads.async`：结构性划分，非运行时分支
+
+`inthreads.async (condition)` 的含义是：仅当 `condition` 为真的那些线程，其程序中**才包含**该代码块。它**不是**“每条线程都求值条件，部分跳过 body”——那是 `if` 的行为。该区别影响你对硬件的理解：
+
+- **结构性划分**（`inthreads.async`）：两条（或更多）独立的直线型 body，为不同线程子集编译。生产者 warpgroup 与消费者 warpgroup 是共享地址空间的不同程序。
+- **运行时分支**（`if`）：单一程序；每条活跃线程测试谓词；部分执行所取分支，部分不执行。
+
+在传统 GPU 编程中，整个 block 通常共享一个内核。加载与运算之间的重叠则依赖指令级交错，或手工展开的 warp 特化配合屏障与原子操作。鳄霸的 `inthreads.async` 将角色边界纳入语言，使划分显式且各 body 保持简单。
+
+矩阵乘法的典型模式是 **一生产者 + 一消费者（1P1C）**：一个 warpgroup 向共享内存发起 DMA（或 TMA）；另一个对相应 tile 运行 MMA。下面是无同步的骨架：
 
 ```choreo
 parallel p1 by 2 : group-4 {
@@ -25,13 +35,17 @@ parallel p1 by 2 : group-4 {
 }
 ```
 
-`parallel p1 by 2 : group-4` 创建两个 warpgroup，各含 128 个线程。第一个 `inthreads.async` 块仅在 warpgroup 0（生产者）上运行；第二个仅在 warpgroup 1（消费者）上运行。由于两个函数体在结构上相互独立，硬件可在一个 warpgroup 上调度 TMA 加载，同时在另一个上运行 WGMMA——真正的重叠，而非交错执行。
+**`parallel p1 by 2 : group-4`** — 两个 warpgroup，每个四个 warp（每个 warpgroup 128 条线程），由 `p1` 索引。
 
-与第 3 章中的 `parallel` 对比：那里每个线程执行相同的函数体。此处 `inthreads.async` 根据并行索引**区分**不同函数体。可将其理解为「每个 warpgroup 有不同的任务描述」。
+**`inthreads.async (p1 == 0)`** — 仅 warpgroup 0 编译并执行生产者 body；对其他线程并非空转一次。
+
+**`inthreads.async (p1 == 1)`** — 仅 warpgroup 1 执行消费者 body。两段并非同一循环的两个分支，而是两种角色。
+
+与第 3 章的 `parallel` 对比：那里每条线程执行相同 body。此处并行索引**选择**适用哪份任务描述。硬件可在生产者 warpgroup 上调度 TMA 工作，同时在消费者上运行 WGMMA——时间上的重叠，而非对单条指令流做时间片轮转。
 
 ## 1P1C 矩阵乘法骨架
 
-下面展示 `inthreads.async` 如何嵌入 Hopper 矩阵乘法。同步细节（事件、wait、trigger）有意省略——第 6 章将补充。请重点关注角色划分：
+下面展示该划分如何嵌入 Hopper 矩阵乘法。事件、等待与触发有意省略；[第 6 章](ch06-synchronization.md) 补充同步。请关注分工：
 
 ```choreo
 __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, N] output) {
@@ -68,11 +82,17 @@ __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, 
 }
 ```
 
-生产者从不接触 `mc`、`mma.load` 或 `mma.row.row`；消费者从不发出用于填充共享内存的 `dma.copy`。每个函数体都是对 K 的干净、直线式循环。缺失的一环——消费者在读取之前如何得知 tile 已就绪——属于同步问题，将在第 6 章讨论。
+**`parallel {block_m, block_n} by [...] : block`** — 与前几章相同的 tile 网格；`cdiv`（向上取整除法）在维度非整除时统计沿 M、N 的 tile 数。
 
-## `if` 守卫：条件执行
+**生产者 `foreach`** — 以 `cdiv(K, MATMUL_TILE_K)` 步遍历 K 维；仅生产者向 `lhs_load_s` 与 `rhs_load_s` 发出 `dma.copy`。
 
-有时需要普通的条件分支。鳄霸的 `if` 与 C 语言类似：
+**消费者 `mma.fill` / `mma.row.row` / `mma.store`** — 消费者从不执行上述 DMA 填充；只读共享内存，在 `mc` 中累加并写回结果 tile。
+
+**缺失的协调** — 两侧此处各自独立遍历 K。消费者假定读取每一 K 条带时已就绪；使该假设成立属于同步问题（第 6 章）。
+
+## `if` 守卫：运行时条件执行
+
+有时需要每条线程都参与的谓词。鳄霸的 `if` 行为与 C 一致：
 
 ```choreo
 if (tile_id < total_tiles) {
@@ -80,15 +100,15 @@ if (tile_id < total_tiles) {
 }
 ```
 
-这是**运行时**检查，而非像 `inthreads.async` 那样的结构性角色划分。每个线程都会对条件求值；条件为假时跳过函数体。
+**`if (tile_id < total_tiles)`** — 作用域内所有线程测试条件；为假则跳过 body。这与 `inthreads.async` 相反：单一程序，发散执行。
 
-何处需要？主要在**持久内核**中：固定数量的块在可变数量的 tile 上迭代，部分块可能多一次迭代，却没有实际工作可做。
+该模式最常见于**持久化内核**：循环迭代次数可能使部分 block 多出一次不对应真实 tile 的“填充”迭代。
 
-## 持久内核
+## 持久化内核
 
-在第 3–4 章中，网格规模与问题规模成比例：每个输出 tile 对应一块。对大矩阵而言，可能意味着数十万个块。GPU 以**波次**调度它们，最后一波往往使大量 SM 空闲——即**尾波利用率不足**。
+在第 3–4 章中，网格随问题规模增长：大致每个输出 tile 一个 block。对大矩阵而言 launch 次数可能极大。GPU 以**波（wave）**运行 block；最后一波常使 SM 部分空闲——**尾部利用率不足（tail underutilization）**。
 
-**持久内核**扭转这一做法：启动**固定**数量的块（通常与 SM 数量一致），每块在多个 tile 上循环：
+**持久化内核**将 launch 规模固定（常接近 SM 数量），并让每个 block 遍历多个 tile：
 
 ```choreo
 __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, N] output) {
@@ -127,43 +147,51 @@ __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, 
 }
 ```
 
-此处三者协同工作：
+**`int total_tiles`** — 输出 tile 的线性计数；各轴 tile 数之积，每轴用 `cdiv` 计算以包含部分 tile。
 
-**固定启动。** `parallel block_id by NUM_SMS : block` 恰好创建 `NUM_SMS` 个块（例如在 H800 PCIe 上为 114）。索引 `block_id` 并不绑定单个输出 tile——它标识你是哪一个持久工作线程。
+**`parallel block_id by NUM_SMS : block`** — 固定 worker 数量；`block_id` 表示该持久 worker 的编号，而非单个输出 tile。
 
-**Tile 条带化。** `tile_id = tile_iter # block_id` 将迭代次数与块索引组合，得到唯一的 tile id。块 `b` 处理 tile `b`、`b + NUM_SMS`、`b + 2 * NUM_SMS`，依此类推——在线性化的 tile 列表上以步长 `NUM_SMS` 遍历。`#` 组合运算符与第 2 章相同，此处用于调度算术而非张量索引。
+**`foreach {tile_iter} in [cdiv(total_tiles, NUM_SMS)]`** — 每个 block 走过其份额的迭代；向上取整可能为部分 block 增加一次额外迭代。
 
-**线性到二维映射。** `block_m = tile_id / cdiv(N, MATMUL_WARP_N)` 与 `block_n = tile_id % cdiv(N, MATMUL_WARP_N)` 由线性 id 恢复二维 tile 位置，与在 C 中将扁平数组索引转为行、列的方式相同。
+**`tile_id = tile_iter # block_id`** — 将迭代索引与 block 索引组合，在线性 tile 列表上条带化（与第 2 章相同的 `#` 运算符，此处用于调度）。
 
-**`if` 守卫。** 由于 `foreach {tile_iter}` 执行 `cdiv(total_tiles, NUM_SMS)` 次迭代，部分块可能多一次迭代，`tile_id` 可能超过 `total_tiles`。`if` 对这些填充迭代跳过全部 TMA、MMA 与存储工作。若无此守卫，将发生越界索引。
+**`block_m` / `block_n`** — 将线性 `tile_id` 映射为二维 tile 坐标，用除法与取模，`cdiv(N, MATMUL_WARP_N)` 为沿 tile 的行宽。
 
-内层函数体——K 循环、MMA、存储——与第 4 章非持久版本相同。仅**外层**改变：固定并行、tile 循环、组合与守卫。
+**`if (tile_id < total_tiles)`** — 当条带越过最后一个真实 tile 时跳过 TMA、MMA 与存储。若无此守卫，将读写越界。
 
-## `cdiv`：向上取整除法
+内层 K 循环与 MMA body 与第 4 章非持久化风格一致。仅**外层**变化：固定 launch、条带化与守卫。域边界上的部分 tile 在生产内核中仍需掩码或收尾处理；`cdiv` 用于在无法保证整除时确定网格与循环规模。
 
-`cdiv(a, b)` 计算 \\(\lceil a / b \rceil\\)——在维度未必整除时所需的 tile 数量。它随处可见：网格范围（`cdiv(M, MATMUL_WARP_M)`）、循环边界（`cdiv(K, MATMUL_TILE_K)`）以及持久迭代次数（`cdiv(total_tiles, NUM_SMS)`）。
+![持久化内核：条带化 tile、block 着色，以及针对填充的 if 守卫](../assets/images/ch05/fig2_persistent_kernel_dark.png#only-dark)
+![持久化内核：条带化 tile、block 着色，以及针对填充的 if 守卫](../assets/images/ch05/fig2_persistent_kernel_light.png#only-light)
 
-当最后一块 tile 为部分有效（有效元素少于 tile 大小时），实际内核会将 `cdiv` 与谓词掩码、零填充或 epilogue 清理配合使用。本教程保持整除的干净情形，但 `cdiv` 正是书写不假定完美整除的 tile 计数的方式。
+## 数据相关网格与持久化网格的选择
 
-## 在数据相关网格与持久网格之间选择
-
-| 方面 | 每 tile 一块 | 持久（`NUM_SMS` 块） |
+| 方面 | 每 tile 一个 block | 持久化（`NUM_SMS` 个 block） |
 |--------|-------------------|-------------------------------|
 | 网格规模 | 随问题增长 | 固定 |
-| 尾波利用率 | 最后一波可能使 SM 空闲 | 各 SM 保持忙碌 |
+| 尾部利用率 | 最后一波可能使 SM 空闲 | 各 SM 保持忙碌 |
 | 额外构造 | 最少 | `total_tiles`、`tile_iter # block_id`、`if` |
 | 复杂度 | 较低 | 较高 |
 
-二者均不改变正确性；在浮点结合律意义下输出相同。当 `total_tiles` 远大于 SM 数量时——大矩阵问题中常见——持久布局更有优势。
+两种布局本身不会改变数学结果；在浮点结合律意义下均可一致。当 `total_tiles` 远大于 SM 数量时——大 GEMM 常见——持久化调度往往更划算。
 
-## 新语法
+## 本章小结
+
+| 主题 | 要点 |
+|-------|----------|
+| 均匀 vs 特化 | 每条线程同一内核最简单；角色划分可重叠内存与计算。 |
+| `inthreads.async` | 结构性：不同线程不同 body——并非共享的 `if`。 |
+| `if` | 运行时：每条线程求值条件；为假则跳过 body。 |
+| 持久化内核 | 固定 `NUM_SMS` 个 block，线性 tile id，用 `#` 条带化，用 `if` 守卫。 |
+| `cdiv` | 向上取整除法，用于 tile 计数与循环边界（全书通用；无单独配方）。 |
+
+**新语法**
 
 | 语法 | 含义 |
 |--------|---------|
-| `inthreads.async (condition)` | 仅满足 `condition` 的线程执行该块——结构性角色划分 |
-| `if (expr) { ... }` | 运行时条件——当 `expr` 为假时跳过函数体 |
-| `cdiv(a, b)` | 向上取整除法 |
-| `tile_id = tile_iter # block_id` | 将迭代索引与块索引组合以实现 tile 条带化 |
-| `int total_tiles = expr` | 鳄霸函数中的局部整型变量 |
+| `inthreads.async (condition)` | 仅满足 `condition` 的线程包含该代码块——结构性角色划分 |
+| `if (expr) { ... }` | 运行时条件——`expr` 为假时跳过 body |
+| `tile_id = tile_iter # block_id` | 组合迭代索引与 block 索引以实现 tile 条带化 |
+| `int total_tiles = expr` | 鳄霸函数中的局部整数 |
 
-warp 特化划分角色；`if` 守卫边界情况。但 1P1C 骨架中的生产者与消费者仍各自独立运行 K 循环而互不协调——消费者假定 tile 已就绪。[下一章](ch06-synchronization.md) 将介绍事件、swap 与流水线模式，使生产者与消费者可在时间上安全重叠。
+要使 1P1C 骨架安全，生产者与消费者仍需对“就绪”有共同约定。[第 6 章](ch06-synchronization.md) 增加 **event**、**swap** 与 **pipeline** 模式，使两侧可在时间上重叠而不在共享内存上竞态。

@@ -1,24 +1,23 @@
 # Synchronization: Pipelines, Events, and Double Buffering
 
-Chapter 5 split the matmul into a producer (loads data) and a consumer (runs MMA). But the skeleton cheated: it assumed the consumer could read shared memory the instant the producer wrote it. In reality, you need **synchronization** — a way for the producer to say "this buffer is ready" and the consumer to wait until it is.
+Chapter 5 carved the matmul into two jobs: a **producer** warpgroup that issues loads into shared memory, and a **consumer** warpgroup that runs MMA on those tiles. The skeleton was honest about the split, but it quietly assumed something impossible: that the consumer could treat shared memory as if it updated the moment the producer wrote it. Real hardware does not work that way. Without coordination, the consumer might read a tile mid-write, or the producer might stomp a buffer still in use — classic **data races**.
 
-This chapter introduces the primitives that make pipelined execution safe: **events** for signaling between roles, **`swap`** and **`rotate`** for double- and multi-buffering, **`dma.copy.async`** for non-blocking transfers, and the **prologue / steady-state / epilogue** pattern that overlaps memory movement with compute.
+This chapter is one story: **how to make pipelined execution safe.** Croktile gives you **events** so separate roles can signal readiness, **`swap` / `rotate`** so double- or multi-buffering stays legible, **`dma.copy.async`** so loads can overlap with compute, and the **prologue / steady-state / epilogue** pattern to structure the K-loop. We start from the single-threaded case (same program counter loads and computes), then add events when producer and consumer truly diverge.
 
-## The Problem: Sequential Load-Then-Compute
+## Why You Cannot "Just Overlap" Without Coordination
 
-Picture the K loop from a naive tiled matmul. Each iteration:
+Walk the K loop of a tiled matmul with **one** staging buffer. Each iteration must: copy the A- and B-tiles into shared memory, wait until those copies are visible, then run MMA on that tile. If you tried to start the *next* iteration's copies while MMA still reads the same buffer, you would **overwrite** bytes the tensor cores are consuming. No amount of wishful scheduling fixes that; you need a happens-before relationship between "bytes landed" and "MMA reads them."
 
-1. Copy the A-tile and B-tile into shared memory.
-2. Wait for the copies to finish.
-3. Run MMA on the loaded tiles.
+In hand-written CUDA, people enforce that with **barriers** (`__syncthreads`), **atomics**, or **CUDA events** wired between streams. The bookkeeping explodes quickly: you track which phase owns which buffer, which fence clears which hazard, and you hope every path through the loop matches. Croktile narrows the design space: **events** for cross-role signaling, **`swap`** for rotating buffer *names* without copying data, and explicit **`wait` / `trigger`** so the credit flow stays visible in the source.
 
-Steps 2 and 3 cannot overlap with the **next** iteration's step 1 if you hold only one buffer — you would overwrite data that the MMA is still reading. So the timeline is a staircase: load, compute, load, compute, with one side of the machine always idle.
+The picture below contrasts a strict **load-then-compute** staircase with **double-buffered** overlap: same logical work, less idle time on the memory or math side when the pipeline fills.
+
+![Sequential vs double-buffered K-tile timelines (schematic)](../assets/images/ch06/fig1_pipeline_timeline_dark.png#only-dark)
+![Sequential vs double-buffered K-tile timelines (schematic)](../assets/images/ch06/fig1_pipeline_timeline_light.png#only-light)
 
 ## Double Buffering with `swap`
 
-The fix is two buffers. While the MMA reads buffer 0, the producer fills buffer 1 with the next tile. When the MMA finishes, you **swap** the buffers: what was "next" becomes "current," and the now-free slot is ready for the following load.
-
-Croktile spells this with `dma.copy.async` (non-blocking copy), `dma.any` (placeholder future), `swap` (exchange future handles), and a three-phase loop.
+Give the K-loop **two** logical buffers. While MMA drains buffer 0, DMA fills buffer 1 with the next tile. After the math step, **swap** the handles: what was "next" becomes "current," and the freed slot is ready for the following load. Croktile spells this with `dma.copy.async` (non-blocking copy), `dma.any` (a placeholder future), `swap` (exchange futures), and a three-phase loop.
 
 ```choreo
 __co__ auto matmul(s32 [M, K] lhs, s32 [K, N] rhs) {
@@ -58,69 +57,63 @@ __co__ auto matmul(s32 [M, K] lhs, s32 [K, N] rhs) {
 }
 ```
 
-Here is what each new construct does.
-
-## `with tile_k in 16`
+### **`with tile_k in 16`**
 
 ```choreo
 with tile_k in 16 {
 ```
 
-This opens a **scoped region** and binds `tile_k` as a tile axis with extent 16. Inside the block, `tile_k` serves as the chunk index for `chunkat` along the K dimension, and `#tile_k` gives its extent (16). Think of it as "within this scope, K is divided into 16 tiles."
+Opens a **scoped region** and binds `tile_k` as a tile axis with extent 16. Inside the block, `tile_k` is the chunk index for `chunkat` along K, and `#tile_k` is 16 — "within this scope, K is divided into 16 tiles."
 
-## `dma.any`: Placeholder Futures
+### **`dma.any`: placeholder futures**
 
 ```choreo
 lf1 = dma.any;
 rf1 = dma.any;
 ```
 
-`dma.any` creates a future that does not yet represent any real transfer. It exists so the type system has something to `swap` with on the first iteration. Before any code reads `lf1.data`, a real `dma.copy` will have been assigned to it.
+`dma.any` is a future that does not yet represent a transfer. It exists so the type system has something to `swap` against on the first steady-state iteration. Before any use of `lf1.data`, a real `dma.copy` has been assigned.
 
-## `foreach tile_k(1:)`: Sliced Iteration
+### **`foreach tile_k(1:)`: sliced iteration**
 
 ```choreo
 foreach tile_k(1:) {
 ```
 
-The `(1:)` slice means "iterate `tile_k` starting at 1, through the remaining tiles." Tile 0 was already handled by the prologue — the initial loads into `lf0` and `rf0`. So the steady-state loop runs for tiles 1, 2, ..., 15.
+`(1:)` means tile indices `1, 2, …` through the end. Tile 0 was loaded in the prologue into `lf0`/`rf0`.
 
-## The Three Phases
+### **The three phases**
 
-**Prologue.** Load tile 0 into `lf0`/`rf0`. No compute yet — the buffers are being filled.
+**Prologue.** Issue loads for tile 0 into `lf0`/`rf0`. No compute yet.
 
-**Steady state.** For each subsequent tile: start loading into `lf1`/`rf1` (the "next" buffers), then compute on `lf0`/`rf0` (the "current" buffers that were filled on the previous iteration). After computing, `swap(lf0, lf1)` exchanges the handles — what was "next" becomes "current" for the following iteration.
+**Steady state.** For each later tile: start loads into `lf1`/`rf1`, compute on `lf0`/`rf0` from the previous iteration, then `swap` so names track the active buffers. New copies land in `lf1`/`rf1` **before** the compute reads `lf0`/`rf0`, so you never read a buffer being overwritten.
 
-**Epilogue.** After the last swap, `lf0`/`rf0` hold the final tile. One more compute pass drains it.
+**Epilogue.** After the last swap, `lf0`/`rf0` hold the final tile; one more compute pass drains them.
 
-The ordering matters: new copies are assigned to `lf1`/`rf1` **before** the compute reads `lf0`/`rf0`. This keeps the dependence story clear: you never read from a buffer that is simultaneously being overwritten.
+### **`swap`: names, not bytes**
 
-## `swap`: Names, Not Data
+`swap(lf0, lf1)` exchanges **future handles**. Shared-memory contents stay where the hardware placed them; only Croktile-level names rotate. The same idiom in CUDA is often a `^ 1` buffer index or a boolean phase; here the intent is explicit. For triple buffering, `rotate(f0, f1, f2)` cycles three handles in one step.
 
-`swap(lf0, lf1)` exchanges **future handles**, not tensor data. After a swap, the name `lf0` refers to whatever asynchronous operation `lf1` referred to before, and vice versa. The data already staged in shared memory stays where the hardware put it; only the Croktile-level handles rotate.
+### **`auto` return type**
 
-In hand-written CUDA, the same idea appears as toggling between two `__shared__` arrays with a `^ 1` index or a boolean phase variable. Croktile makes the intent visible at the language level.
+`__co__ auto matmul(...)` lets Croktile infer the result type from `return output`, which keeps the signature aligned with shape expressions.
 
-For triple buffering, use `rotate(f0, f1, f2)` instead of two `swap` calls — it cycles three handles in one operation.
+## Events: When Producer and Consumer Are Different Programs
 
-## `auto` Return Type
-
-The kernel signature uses `__co__ auto matmul(...)`: the `auto` return type tells Croktile to infer the result type from `return output`. This keeps the header aligned with shape expressions and avoids repeating literal dimensions.
-
-## Events: Synchronization Between Roles
-
-Double buffering with `swap` works when one set of threads does both loading and computing — they interleave steps on the same program counter. Warp specialization (Chapter 5) assigns loading and computing to **different** warpgroups. Those groups need a different coordination mechanism: **events**.
+`swap` works when **one** thread group interleaves loads and MMA in a single schedule. Warp specialization (Chapter 5) puts loading and computing on **different** warpgroups with different program counters. They cannot share a `swap` schedule line-by-line; they need **events** — named synchronization in shared scope.
 
 ```choreo
 shared event full[MATMUL_STAGES], empty[MATMUL_STAGES];
 ```
 
-`shared event` declares named synchronization barriers in shared scope. `wait event_name` blocks until the event has been signaled; `trigger event_name` signals it. In the 1P1C matmul:
+`wait event_name` blocks until that event has been signaled; `trigger event_name` wakes waiters. For the 1P1C matmul, a common convention is:
 
-- `full[s]` means stage `s` has been filled by the producer — the consumer may read it.
-- `empty[s]` means the consumer is done with stage `s` — the producer may overwrite it.
+- `full[s]` — stage `s` has been filled; the consumer may read it.
+- `empty[s]` — the consumer has released stage `s`; the producer may overwrite it.
 
-Here is the full 1P1C kernel with events:
+Staging for tiles that many threads share still lives in **`=> shared`**; Chapter 2 and Chapter 3 already covered **local** vs **shared** placement — the new ingredient here is *who* waits on *which* event, not the memory space alone.
+
+### **1P1C kernel with events**
 
 ```choreo
 __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, N] output) {
@@ -168,39 +161,22 @@ __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, 
 }
 ```
 
-**Ring indexing.** `stage = iv_k % MATMUL_STAGES` maps the unbounded K timeline onto a fixed number of physical slots — like double buffering generalized to N buffers. With `MATMUL_STAGES = 4`, the producer can run up to 4 K-tiles ahead of the consumer before it has to wait for a slot to be freed.
+**Ring index.** `stage = iv_k % MATMUL_STAGES` maps the unbounded K iteration to a fixed number of physical slots — double buffering generalized to N buffers. With four stages, the producer can run several tiles ahead before blocking on `wait empty`.
 
-**Producer flow.** For each `iv_k`: wait until `empty[stage]` says the slot is free, copy tiles into that stage's region of `lhs_load_s` and `rhs_load_s`, then `trigger full[stage]` to tell the consumer the data is ready.
+**Producer path.** For each `iv_k`, `wait empty[stage]` acquires a free slot, the `dma.copy` lines fill `lhs_load_s`/`rhs_load_s` at that `stage`, then `trigger full[stage]` hands the slot to the consumer. If you drop the initial `trigger empty` bootstrap in the consumer prologue, the first `wait empty` never completes — a deadlock, not a mysterious MMA bug.
 
-**Consumer flow.** Before the K loop, `trigger empty[s]` for all stages bootstraps credits — every slot starts logically empty, which prevents the producer from deadlocking on the first `wait empty`. Then for each `iv_k`: `wait full[stage]`, run MMA on that stage's data, `mma.commit`, then `trigger empty[stage]` to return the slot.
+**Consumer path.** The loop `foreach {s} in [MATMUL_STAGES] { trigger empty[s]; }` runs **before** the K-loop so every stage starts with an **empty** credit. Otherwise the producer would wait forever on the first tile. Then each `iv_k`: `wait full[stage]`, MMA over that stage, `mma.commit`, `trigger empty[stage]` to release the slot. Skipping `mma.commit` or signaling `empty` before the math is really done risks reuse while operands are still live — another form of undersynchronization.
 
-**`mma.commit`.** This marks a logical boundary after the MMA sequence for one K-slab. WGMMA on Hopper overlaps operand fetch, issue, and accumulation aggressively; `mma.commit` is the fence that says "fold this stage's partial products into `mc` before the shared buffer is reused." Treat it as mandatory glue between "done with this stage's math" and "signal empty."
+**`mma.commit`.** Hopper WGMMA overlaps issue and accumulation; `mma.commit` is the fence that completes one K-slab's contribution to `mc` before that stage's shared buffer may be logically reused. Treat it as required glue between "done with this stage" and `trigger empty`.
 
 ## Credit Flow for One Stage
 
-1. Consumer pre-triggers `empty[stage]` (bootstrap).
-2. Producer passes `wait empty[stage]` — the slot is free.
-3. Producer fills shared memory for this K-tile, then `trigger full[stage]`.
-4. Consumer passes `wait full[stage]` — the data is ready.
-5. Consumer runs MMA, commits, then `trigger empty[stage]` — the slot is free again.
-6. When `iv_k` wraps around (modulo `MATMUL_STAGES`), the cycle repeats.
+The diagram matches the code: bootstrap grants empty credits; the producer waits on `empty`, fills, signals `full`; the consumer waits on `full`, computes, signals `empty`. When `iv_k` wraps modulo `MATMUL_STAGES`, the same physical stage re-enters the cycle — the ring is safe because `wait`/`trigger` serialize access, not because modulo arithmetic is magic.
 
-The ring is not magic — `wait`/`trigger` on `full`/`empty` are what make `iv_k % MATMUL_STAGES` safe.
+![Event credit flow for one pipeline stage](../assets/images/ch06/fig2_event_credit_flow_dark.png#only-dark)
+![Event credit flow for one pipeline stage](../assets/images/ch06/fig2_event_credit_flow_light.png#only-light)
 
-## Shared vs Local for Staging
-
-Chapter 2 used `=> local` for thread-private copies. Pipelining a tile that many threads read almost always points to `=> shared`. The DMA futures track which asynchronous transfer owns which shared buffer; the `swap` or ring index keeps the bookkeeping straight.
-
-A useful rule: if every thread in the block reads overlapping regions of the same staged tile, `=> shared`. If each thread consumes a disjoint piece with no cross-thread reuse, `=> local` keeps data closer.
-
-## Pitfalls
-
-- **Deadlock.** Removing the initial `trigger empty[s]` loop leaves the producer's first `wait empty` waiting forever.
-- **Undersynchronized reuse.** Dropping `mma.commit` or mis-ordering `trigger empty` relative to loads risks stale data.
-- **Mismatched trip counts.** Producer and consumer must both use `foreach {iv_k} in [cdiv(K, MATMUL_TILE_K)]`; asymmetric loops leak or orphan events.
-- **Too few stages.** If the consumer is faster than the producer, you stall on `wait full`; more stages increase run-ahead (at the cost of shared memory).
-
-When a pipeline edit breaks correctness, check **event order** before you suspect MMA layout — specialization bugs are usually synchronization bugs.
+If something looks wrong after you edit a pipeline, verify **event order and trip counts** before you chase MMA layout: producer and consumer must use the same `cdiv(K, MATMUL_TILE_K)` loop, and too few stages shifts pressure to `wait full` when the consumer outruns the producer.
 
 ## New Syntax
 
@@ -218,4 +194,15 @@ When a pipeline edit breaks correctness, check **event order** before you suspec
 | `mma.commit` | Fence between pipeline stages for WGMMA |
 | `__co__ auto fn(...)` | Return type inferred from `return` statement |
 
-The pipeline is now safe: producer and consumer overlap through events, the ring index cycles shared buffers, and `mma.commit` keeps the accumulator coherent. The [next chapter](ch07-advanced-movement.md) pushes data movement further with hardware-accelerated TMA, swizzled shared-memory layouts, and `view`/`from` for irregular access patterns.
+## Summary
+
+| Idea | Role |
+|------|------|
+| Data races | Unsynchronized overlap lets loads clobber MMA operands or read partial tiles. |
+| CUDA-style fixes | Barriers, atomics, and manual event wiring work but scale poorly in complexity. |
+| `swap` / `rotate` | Rotate **futures** so double- or multi-buffering stays explicit in one program. |
+| `shared event` | Coordinate **different** warpgroups with `wait` / `trigger` and a credit discipline. |
+| Bootstrap `empty` | Required so the producer's first `wait empty` can succeed. |
+| `mma.commit` | Separates completed math for one K-slab from reuse of shared staging. |
+
+The pipeline is now safe for split roles. The [next chapter](ch07-advanced-movement.md) moves on to hardware-accelerated **TMA**, **swizzled** shared layouts, and **`view` / `from`** for irregular access — the same synchronization ideas, with richer movement primitives underneath.

@@ -55,10 +55,48 @@ render_static ch02_fig_future_data.py FutureData fig_future_data "$DOCS/images/c
 render_static ch02_fig_memory_hierarchy.py MemoryHierarchy fig_memory_hierarchy "$DOCS/images/ch02"
 render_static ch02_fig_span.py SpanDimension fig_span "$DOCS/images/ch02"
 
+echo "=== Ch04 static ==="
+mkdir -p "$DOCS/images/ch04"
+render_static ch04_fig1_mma_lifecycle.py MMALifecycle fig1_mma_lifecycle "$DOCS/images/ch04"
+render_static ch04_fig2_sm86_vs_sm90.py SM86vsSM90 fig2_sm86_vs_sm90 "$DOCS/images/ch04"
+
+echo "=== Ch05 static ==="
+mkdir -p "$DOCS/images/ch05"
+render_static ch05_fig1_role_split.py Ch05Fig1RoleSplit fig1_role_split "$DOCS/images/ch05"
+render_static ch05_fig2_persistent_kernel.py Ch05Fig2PersistentKernel fig2_persistent_kernel "$DOCS/images/ch05"
+
+echo "=== Ch06 static ==="
+mkdir -p "$DOCS/images/ch06"
+render_static ch06_fig1_pipeline_timeline.py PipelineTimeline fig1_pipeline_timeline "$DOCS/images/ch06"
+render_static ch06_fig2_event_credit_flow.py EventCreditFlow fig2_event_credit_flow "$DOCS/images/ch06"
+
+echo "=== Ch07 static ==="
+mkdir -p "$DOCS/images/ch07"
+render_static ch07_fig1_tma_vs_dma.py TmaVsDma fig1_tma_vs_dma "$DOCS/images/ch07"
+render_static ch07_fig2_swizzle.py SwizzleBanks fig2_swizzle "$DOCS/images/ch07"
+
+echo "=== Ch08 ==="
+mkdir -p "$DOCS/images/ch08"
+render_static ch08_fig1_escape_hatch.py Ch08Fig1EscapeHatch fig1_escape_hatch "$DOCS/images/ch08"
+
+echo "=== Ch09 ==="
+mkdir -p "$DOCS/images/ch09"
+render_static ch09_fig1_debug_workflow.py DebugWorkflow fig1_debug_workflow "$DOCS/images/ch09"
+
 echo "=== Ch02 animations ==="
 render_video ch02_anim1_element_vs_block.py ElementVsBlockAnim anim1_element_vs_block "$DOCS/videos/ch02"
 render_video ch02_anim2_tiled_add.py TiledAddAnim anim2_tiled_add "$DOCS/videos/ch02"
 render_video ch02_anim3_chunkat.py ChunkatAnim anim3_chunkat "$DOCS/videos/ch02"
+
+echo "=== Ch03 static ==="
+mkdir -p "$DOCS/images/ch03"
+render_static ch03_fig1_virtual_parallelism.py VirtualParallelism fig1_virtual_parallelism "$DOCS/images/ch03"
+render_static ch03_fig2_logical_vs_physical.py LogicalVsPhysical fig2_logical_vs_physical "$DOCS/images/ch03"
+render_static ch03_fig3_space_specifiers.py SpaceSpecifiers fig3_space_specifiers "$DOCS/images/ch03"
+render_static ch03_fig4_shared_reuse.py SharedReuse fig4_shared_reuse "$DOCS/images/ch03"
+render_static ch03_fig5_scalar_matmul.py ScalarMatmul fig5_scalar_matmul "$DOCS/images/ch03"
+render_static ch03_fig6_dma_matmul.py DmaMatmul fig6_dma_matmul "$DOCS/images/ch03"
+render_static ch03_fig7_matmul_gpu_layout.py MatmulGpuLayout fig7_matmul_gpu_layout "$DOCS/images/ch03"
 
 echo "=== Optimization ==="
 for scene in BaselineKernel Step2ThreeStage SplitOutput1p2c OccupancyCliff; do

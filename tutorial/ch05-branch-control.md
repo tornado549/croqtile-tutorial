@@ -1,14 +1,24 @@
-# Branch and Control: Warp Roles and Persistent Kernels
+# Warp Specialization and Control Flow
 
-Up to now, every thread in a block runs the same code. They all load the same tiles, they all run the same MMA, they all store the same result. That uniformity is clean, but it has a cost: while tensor cores are busy multiplying, the memory system could be prefetching the next tile — except nobody is asking it to, because every thread is stuck in the `mma.row.row` instruction.
+Chapter 4 walked through the MMA lifecycle on Hopper: `mma.load` from shared, `mma.row.row` on tensor cores, accumulation in registers, then `mma.store` and `dma.copy` back to global memory. That pipeline is effective. It also has a structural limitation: while the tensor cores are busy multiplying, the memory system often idles, because every thread in the block runs the same kernel body. Nobody is left to issue the next bulk load while MMA is in flight.
 
-This chapter introduces two forms of control flow that break that uniformity on purpose. **Warp specialization** (`inthreads.async`) assigns different roles to different warpgroups — one loads data while another computes. **Conditional guards** (`if`) let you skip work when a tile index falls out of bounds, which is central to **persistent kernels** that run a fixed pool of blocks across a variable number of tiles.
+Real pipelines are not uniform like that. A producer loads data; a consumer turns it into math. On a CPU you might use threads and queues. On a GPU, the classic CUDA approach is to keep one kernel but add careful synchronization so different warps play different roles. Croktile makes the split **structural**: `inthreads.async` assigns different straight-line programs to different warpgroups, so the hardware can overlap DMA with MMA without every thread executing both paths. When the schedule itself needs a decision — for example, skipping tiles past the end of the problem — you use an ordinary **`if`**, which is a **runtime** branch, not a role split.
 
-## `inthreads.async`: Splitting Roles
+This chapter has one thread: how to give warpgroups different jobs, and when to guard work with conditionals. The second half covers **persistent kernels**, where a fixed pool of blocks stripes across many output tiles and `if` prevents out-of-bounds stores.
 
-`inthreads.async (condition)` says: "only the threads for which `condition` is true execute this block." It is not a runtime branch that every thread evaluates and some skip — it is a **structural split** that creates two (or more) straight-line programs, one per role, which can run concurrently on different hardware units.
+![1P1C timeline: producer DMA and consumer MMA overlap on a shared time axis](../assets/images/ch05/fig1_role_split_dark.png#only-dark)
+![1P1C timeline: producer DMA and consumer MMA overlap on a shared time axis](../assets/images/ch05/fig1_role_split_light.png#only-light)
 
-The canonical pattern is the **1 producer + 1 consumer (1P1C)** matmul:
+## `inthreads.async`: Structural Split, Not a Runtime Branch
+
+`inthreads.async (condition)` means: only threads for which `condition` is true **have** this block in their program at all. It is **not** “every thread evaluates the condition and some skip the body,” which is what an `if` does. The distinction matters for how you think about the hardware:
+
+- **Structural split** (`inthreads.async`): two (or more) separate straight-line bodies, compiled for different subsets of threads. Producer warpgroups and consumer warpgroups are different programs that happen to share an address space.
+- **Runtime branch** (`if`): one program; every live thread tests the predicate; some execute the taken branch and some do not.
+
+In traditional GPU programming, the entire block usually shares one kernel. Overlap between load and math then depends on instruction-level interleaving or hand-rolled warp specialization with barriers and atomics. Croktile’s `inthreads.async` pushes the role boundary into the language so the split is explicit and the bodies stay simple.
+
+The canonical pattern is **one producer + one consumer (1P1C)** for matmul: one warpgroup issues DMA (or TMA) into shared memory; another runs MMA on those tiles. The skeleton without synchronization looks like this:
 
 ```choreo
 parallel p1 by 2 : group-4 {
@@ -25,13 +35,17 @@ parallel p1 by 2 : group-4 {
 }
 ```
 
-`parallel p1 by 2 : group-4` creates two warpgroups of 128 threads each. The first `inthreads.async` block runs only on warpgroup 0 (the producer); the second runs only on warpgroup 1 (the consumer). Because the two bodies are structurally independent, the hardware can schedule TMA loads on one warpgroup while WGMMA runs on the other — true overlap, not interleaving.
+**`parallel p1 by 2 : group-4`** — Two warpgroups, four warps each (128 threads per warpgroup), indexed by `p1`.
 
-Compare this with Chapter 3's `parallel`, where every thread runs the same body. Here, `inthreads.async` **differentiates** the bodies based on the parallel index. Think of it as "each warpgroup has a different job description."
+**`inthreads.async (p1 == 0)`** — Only warpgroup 0 compiles and executes the producer body; it is not an empty trip for everyone else.
+
+**`inthreads.async (p1 == 1)`** — Only warpgroup 1 runs the consumer body. The two blocks are not branches of one loop; they are two roles.
+
+Compare this with Chapter 3’s `parallel`, where every thread runs the same body. Here the parallel index **selects** which job description applies. The hardware can schedule TMA work on the producer warpgroup while WGMMA runs on the consumer — overlap in time, not time-slicing one instruction stream.
 
 ## A 1P1C Matmul Skeleton
 
-Here is how `inthreads.async` fits into a Hopper matmul. The synchronization details (events, wait, trigger) are deliberately omitted — Chapter 6 will add them. Focus on the role split:
+Here is how the split sits inside a Hopper matmul. Events, wait, and trigger are omitted on purpose; [Chapter 6](ch06-synchronization.md) adds synchronization. Focus on who does what:
 
 ```choreo
 __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, N] output) {
@@ -68,11 +82,17 @@ __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, 
 }
 ```
 
-The producer never touches `mc`, `mma.load`, or `mma.row.row`. The consumer never issues `dma.copy` to fill shared. Each body is a clean, straight-line loop over K. The missing piece — how the consumer knows a tile is ready before reading it — is synchronization, which comes in Chapter 6.
+**`parallel {block_m, block_n} by [...] : block`** — Same tile grid as earlier chapters; `cdiv` (ceiling division) counts tiles along M and N when dimensions are not exact multiples.
 
-## `if` Guards: Conditional Execution
+**Producer `foreach`** — Walks the K dimension with `cdiv(K, MATMUL_TILE_K)` steps; only the producer issues `dma.copy` into `lhs_load_s` and `rhs_load_s`.
 
-Sometimes you need a plain old conditional. Croktile's `if` works like C:
+**Consumer `mma.fill` / `mma.row.row` / `mma.store`** — The consumer never issues those DMA fills; it only reads shared, accumulates in `mc`, and writes the result tile.
+
+**Missing coordination** — The two sides both loop over K independently here. The consumer assumes each K-slab is ready when it reads it; making that true is synchronization (Chapter 6).
+
+## `if` Guards: Runtime Conditional Execution
+
+Sometimes you need a predicate every thread evaluates. Croktile’s `if` behaves like C:
 
 ```choreo
 if (tile_id < total_tiles) {
@@ -80,15 +100,15 @@ if (tile_id < total_tiles) {
 }
 ```
 
-This is a **runtime** check, not a structural role split like `inthreads.async`. Every thread evaluates the condition; threads where it is false skip the body.
+**`if (tile_id < total_tiles)`** — All threads in the scope test the condition; threads where it is false skip the body. That is the opposite of `inthreads.async`: one program, divergent execution.
 
-Where do you need this? Primarily in **persistent kernels**, where a fixed number of blocks iterate over a variable number of tiles, and some blocks may have one extra iteration with no real work to do.
+This shows up most often in **persistent kernels**, where the number of loop iterations can leave some blocks with a “padding” iteration that does not correspond to a real tile.
 
 ## Persistent Kernels
 
-In Chapters 3–4, the grid size was proportional to the problem: one block per output tile. For a big matrix, that can mean hundreds of thousands of blocks. The GPU schedules them in **waves**, and the last wave often leaves many SMs idle — **tail underutilization**.
+In Chapters 3–4, the grid grew with the problem: roughly one block per output tile. For large matrices that can mean huge launch counts. The GPU runs blocks in **waves**; the last wave often leaves SMs partially idle — **tail underutilization**.
 
-A **persistent kernel** flips this: you launch a **fixed** number of blocks (typically matching the SM count), and each block loops over multiple tiles:
+A **persistent kernel** fixes the launch size (often near the SM count) and lets each block iterate over multiple tiles:
 
 ```choreo
 __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, N] output) {
@@ -127,23 +147,22 @@ __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, 
 }
 ```
 
-Three new ideas work together here:
+**`int total_tiles`** — Linear count of output tiles; product of the per-axis tile counts, each computed with `cdiv` so partial tiles are counted.
 
-**Fixed launch.** `parallel block_id by NUM_SMS : block` creates exactly `NUM_SMS` blocks (for example, 114 on an H800 PCIe). The index `block_id` is not tied to a single output tile — it names which persistent worker you are.
+**`parallel block_id by NUM_SMS : block`** — Fixed worker count; `block_id` names which persistent worker this is, not a single output tile.
 
-**Tile striping.** `tile_id = tile_iter # block_id` composes the iteration count with the block index to produce a unique tile id. Block `b` processes tiles `b`, `b + NUM_SMS`, `b + 2 * NUM_SMS`, and so on — a stride-`NUM_SMS` walk through the linearized tile list. The `#` compose operator is the same one from Chapter 2, applied here to scheduling arithmetic instead of tensor indexing.
+**`foreach {tile_iter} in [cdiv(total_tiles, NUM_SMS)]`** — Each block steps through its share of iterations; the ceiling may add one extra iteration for some blocks.
 
-**Linear-to-2D mapping.** `block_m = tile_id / cdiv(N, MATMUL_WARP_N)` and `block_n = tile_id % cdiv(N, MATMUL_WARP_N)` recover the 2D tile position from the linear id, the same way you would convert a flat array index to row and column in C.
+**`tile_id = tile_iter # block_id`** — Composes iteration with block index to stripe across the linear tile list (same `#` operator as Chapter 2, used here for scheduling).
 
-**The `if` guard.** Because `foreach {tile_iter}` runs `cdiv(total_tiles, NUM_SMS)` iterations and some blocks may have one more than needed, `tile_id` can exceed `total_tiles`. The `if` skips all TMA, MMA, and store work for those padding iterations. Without it, you would index out of bounds.
+**`block_m` / `block_n`** — Map linear `tile_id` to 2D tile coordinates using division and modulus with `cdiv(N, MATMUL_WARP_N)` as the row width in tiles.
 
-The inner body — K loop, MMA, store — is identical to the non-persistent version from Chapter 4. Only the **wrapper** changed: fixed parallel, tile loop, compose, and guard.
+**`if (tile_id < total_tiles)`** — Skips TMA, MMA, and store when the stripe walks past the last real tile. Without this guard, you would read and write out of bounds.
 
-## `cdiv`: Ceiling Division
+The inner K-loop and MMA body match the non-persistent style from Chapter 4. Only the **wrapper** changed: fixed launch, striping, and a guard. Partial tiles at domain boundaries still need masks or epilogue handling in production kernels; `cdiv` is how you size grids and loops when divisibility is not guaranteed.
 
-`cdiv(a, b)` computes \\(\lceil a / b \rceil\\) — the number of tiles when the dimension might not be evenly divisible. It appears everywhere: grid extents (`cdiv(M, MATMUL_WARP_M)`), loop bounds (`cdiv(K, MATMUL_TILE_K)`), and persistent iteration counts (`cdiv(total_tiles, NUM_SMS)`).
-
-When the last tile is partial (fewer valid elements than the tile size), real kernels pair `cdiv` with predicate masks, zero-padding, or epilogue cleanup. The tutorial stays on the clean-divisibility case, but `cdiv` is how you write tile counts that do not assume perfect division.
+![Persistent kernel: striped tiles, block colors, and if guard for padding](../assets/images/ch05/fig2_persistent_kernel_dark.png#only-dark)
+![Persistent kernel: striped tiles, block colors, and if guard for padding](../assets/images/ch05/fig2_persistent_kernel_light.png#only-light)
 
 ## Choosing Between Data-Dependent and Persistent Grids
 
@@ -154,16 +173,25 @@ When the last tile is partial (fewer valid elements than the tile size), real ke
 | Extra constructs | Minimal | `total_tiles`, `tile_iter # block_id`, `if` |
 | Complexity | Lower | Higher |
 
-Neither changes correctness; both produce the same output modulo floating-point associativity. Persistent layout pays off when `total_tiles` greatly exceeds the SM count, which is common for large matrix problems.
+Neither layout changes the mathematical result by itself; both can match modulo floating-point associativity. Persistent scheduling tends to pay off when `total_tiles` is much larger than the number of SMs — typical for large GEMMs.
 
-## New Syntax
+## Chapter Summary
+
+| Topic | Takeaway |
+|-------|----------|
+| Uniform vs specialized | Same kernel for every thread maximizes simplicity; role splits overlap memory and compute. |
+| `inthreads.async` | Structural: different bodies for different threads — not a shared `if`. |
+| `if` | Runtime: every thread evaluates the condition; false threads skip the body. |
+| Persistent kernels | Fixed `NUM_SMS` blocks, linear tile ids, striping with `#`, guard with `if`. |
+| `cdiv` | Ceiling division for tile counts and loop bounds (used throughout; no separate recipe needed). |
+
+**New syntax**
 
 | Syntax | Meaning |
 |--------|---------|
-| `inthreads.async (condition)` | Only threads satisfying `condition` execute this block — structural role split |
+| `inthreads.async (condition)` | Only threads satisfying `condition` include this block — structural role split |
 | `if (expr) { ... }` | Runtime conditional — skip body when `expr` is false |
-| `cdiv(a, b)` | Ceiling division |
 | `tile_id = tile_iter # block_id` | Compose iteration index with block index for tile striping |
-| `int total_tiles = expr` | Local integer variable in a Croktile function |
+| `int total_tiles = expr` | Local integer in a Croktile function |
 
-Warp specialization splits roles; `if` guards edge cases. But the producer and consumer in the 1P1C skeleton still run their K loops independently with no coordination — the consumer assumes the tile is ready. The [next chapter](ch06-synchronization.md) introduces events, swap, and pipeline patterns so producer and consumer can safely overlap in time.
+Producer and consumer still need a shared notion of “ready” before the 1P1C skeleton is safe. [Chapter 6](ch06-synchronization.md) adds **events**, **swap**, and **pipeline** patterns so the two sides can overlap in time without racing on shared memory.

@@ -1,60 +1,158 @@
-# 并行性：将工作映射到硬件
+# 并行性：鳄霸如何表达并行工作
 
-第 1、2 章使用 `parallel` 在 GPU 上铺开工作——但没有告诉鳄霸（Croktile）*如何*在硬件上组织这些实例。编译器采用默认策略，对逐元素运算而言这些默认足够好。矩阵乘法则不同：它具有多个分块层级，自然对应 GPU 层次结构的不同层级，映射是否得当，决定了吞吐量是「玩具级」还是「实战级」。
+前两章刻意保持简单：`parallel {i, j} by [4, 8]` 创建了 32 个实例，每个处理一个元素，我们从未追问这些实例究竟在哪里执行。对于逐元素加法和理解数据搬运来说，这已经足够——编译器会选择合理的默认值。但 GPU 并不是一堆相同处理器的平面集合，它拥有层次分明的执行单元体系，而将工作正确映射到层次结构的相应级别，正是玩具演示与真正实用内核之间的关键差距。
 
-本章介绍**空间限定符**——将逻辑并行轴映射到 CUDA thread block、线程、warp 与 warpgroup 的注解。读到最后，你将得到一个使用 `dma.copy => shared` 与嵌套 `parallel`、在线程间复用数据的分块矩阵乘。
+本章将并行性作为鳄霸（Croktile）的核心概念正式引入：它的含义是什么，鳄霸如何将*逻辑*结构（哪些任务并发执行）与*物理*映射（由哪些硬件单元来执行）分离开来，以及你如何通过**空间标注符（space specifiers）**来控制这种映射。
 
-## 再谈 `parallel` 与 `foreach`
+## 我们如何思考并行任务
 
-二者在前文均已出现，但有必要精确说明各自含义：
+在接触任何鳄霸语法之前，先来谈谈"并行"到底意味着什么。
 
-- `parallel p by N` —— 创建 `N` 个彼此独立、并发执行的实例。编译器将它们映射到 GPU 执行单元。适用于各次迭代相互独立的情形。
-- `foreach i in [N]` —— 在包含它的上下文中**顺序**执行 `N` 次迭代。适用于后一次迭代依赖前一次的情形（例如矩阵乘中沿 K 维的归约循环）。
+假设你有八个独立的任务——八个 tile 要做加法，八行数据要处理，随便什么。你可以一次性描述这八个任务，称之为"并行"。但这个声明本身并没有说明有多少个任务*真正同时*在运行。在单核 CPU 上，它们一个接一个地执行；在 4 核 CPU 上，也许四个同时运行；在 GPU 的一个 warp 上，全部八个可能真正地同步执行。
 
-二者均支持 `#p`（范围）与 `#` 组合，且均可为多维（`parallel {a, b} by [M, N]` / `foreach {i, j} in [M, N]`）。
+![虚拟并行性：相同任务，不同硬件调度](../assets/images/ch03/fig1_virtual_parallelism_dark.png#only-dark)
+![虚拟并行性：相同任务，不同硬件调度](../assets/images/ch03/fig1_virtual_parallelism_light.png#only-light)
 
-## 空间限定符：并行性落在何处
+*同样八个任务分别在单线程（1 核）、4 路（CPU）和 8 路（GPU）上调度。任务完全相同——只有硬件不同。*
 
-GPU 并非扁平的一袋线程。它具有层次结构：驻留在流式多处理器（SM）上的 **thread block**（亦称 CTA）、以锁步执行的 32 线程 **warp**，以及在新硬件上由 128 线程（四个 warp）协作执行宽指令的 **warpgroup**。
+关键在于：并行性是一个**虚拟**概念。当你写下"这八个任务是独立的"时，你是在对程序的*逻辑*做声明，而非对硬件做声明。硬件根据自身拥有的执行单元数量和调度器的分配策略，来决定有多少个任务真正同时运行。
 
-鳄霸（Croktile）允许你在范围之后用**空间限定符**将逻辑并行维映射到上述层次：
+这个区别很重要，因为传统的 GPU 编程语言把两者混为一谈。在 CUDA 中，你用 `<<<blocks, threads>>>` 启动内核——这同时声明了逻辑结构（多少个实例）和物理映射（多少个线程块、每块多少个线程）。如果你想改变 tile 划分方式，你也不得不修改启动配置。逻辑与物理纠缠在一起。
+
+鳄霸把它们解开了。
+
+## 鳄霸的双层并行模型
+
+鳄霸提供两个独立的控制维度：
+
+1. **`parallel`** — 声明迭代是独立的，*可以*并发执行。这是一个逻辑层面的声明。
+2. **空间标注符**（`: block`、`: thread`、`: group`、`: group-4`）— 告诉编译器每个并行轴映射到*哪个 GPU 硬件单元*。这是一个物理层面的声明。
+
+还有 `foreach`，它是 `parallel` 的对立面：迭代按顺序依次执行。当后续迭代依赖先前迭代的结果时使用 `foreach`——例如累加循环、K 维归约、先加载 tile *k* 再用它计算的流水线。
 
 ```choreo
-parallel p by 16 : block     // 16 thread blocks
-parallel q by 32 : thread    // 32 threads within a block
-parallel w by 4  : group     // 4 warps (one per group)
-parallel g by 2  : group-4   // 2 warpgroups of 4 warps each (128 threads per group)
+parallel {px, py} by [8, 16] : block    // 并发——映射到线程块
+  foreach {tile_k} in [16]               // 顺序——K 维循环
+    parallel {qx, qy} by [16, 16] : thread  // 并发——映射到线程
+      foreach k in [16]                      // 顺序——内层累加
+        output += lhs * rhs;
 ```
 
-当你写 `parallel p by 16 : block` 时，是在告诉鳄霸：「为该体创建 16 个实例，并将每个实例映射到 GPU 上各自独立的 thread block。」当你写 `parallel q by 32 : thread` 时，则是在说：「在已经所处的 block 内，创建 32 个线程。」
+`parallel` 行声明"这些迭代是独立的"。`: block` 和 `: thread` 标注声明"将外层放在不同的线程块上，将内层放在同一线程块内的不同线程上"。`foreach` 行声明"按顺序执行"。没有歧义，没有混淆。
 
-若完全省略限定符——仅写 `parallel p by 8`——鳄霸会选取合理的默认映射。在性能关键时，显式空间限定符才是你控制映射的手段。
+![鳄霸中的逻辑并行与物理并行](../assets/images/ch03/fig2_logical_vs_physical_dark.png#only-dark)
+![鳄霸中的逻辑并行与物理并行](../assets/images/ch03/fig2_logical_vs_physical_light.png#only-light)
 
-层次结构关系到数据共享。**共享内存**（`=> shared`）对同一块内的所有线程可见，但不可跨 block。因此若希望多个线程读取同一块 DMA 加载的分块，需要这些线程位于同一 block，且分块置于 shared memory。**本地内存**（`=> local`）仅对单个线程私有。**全局内存**处处可见，但较慢。
+*左：程序员编写的逻辑嵌套（parallel = 并发，foreach = 顺序）。右：GPU 硬件层次结构。空间标注符在两者之间建立桥梁。*
 
-## 嵌套并行
+如果你省略空间标注符——只写 `parallel p by 8`——编译器会选择默认映射。第 1 章和第 2 章就是这样做的，对简单情况完全够用。显式标注是你在性能关键场景中掌控映射的方式。
 
-真实 GPU 程序会嵌套这些层级。一种常见模式为：
+`parallel` 和 `foreach` 均支持多维索引（`{a, b}` 语法）、组合运算符（`#`）和范围运算符（`#p`）。第 1 章和第 2 章的所有内容仍然适用。
+
+## 空间标注符与硬件映射
+
+GPU 拥有清晰的执行层次结构。从最粗粒度到最细粒度：
+
+- **线程块（Thread Block / CTA）**——最多 1024 个线程的集合，它们共享片上存储并可以相互同步。
+- **Warpgroup（线程组）**——四个 warp 组成，共 128 个线程，协同执行宽矩阵指令（Hopper GPU 上的 WGMMA）。
+- **Warp（线程束）**——32 个线程同步执行。这是 GPU 的基本 SIMD 单元。
+- **Thread（线程）**——单个执行上下文，拥有自己的寄存器。
+
+鳄霸通过空间标注符映射到每个层级：
+
+![空间标注符映射到 GPU 执行层次结构](../assets/images/ch03/fig3_space_specifiers_dark.png#only-dark)
+![空间标注符映射到 GPU 执行层次结构](../assets/images/ch03/fig3_space_specifiers_light.png#only-light)
+
+*四个空间标注符及其对应的 GPU 硬件单元，包含线程数量和各层级的典型操作。*
+
+### `: block` — 线程块
 
 ```choreo
 parallel {px, py} by [8, 16] : block
-  parallel {qx, qy} by [16, 16] : thread {
-    // each (px, py) block has 16 × 16 = 256 threads
-    // each thread is identified by (qx, qy) within its block
-  }
 ```
 
-外层 `parallel` 产生 8 × 16 = 128 个 block 的网格。内层 `parallel` 在每个 block 内产生 256 个线程。总计：128 × 256 = 32,768 个线程。花括号 `{px, py}` 与 `{qx, qy}` 在一次声明中引入**多维**并行下标——相当于否则需要两行嵌套 `parallel` 的简写。
+创建 8 × 16 = 128 个线程块网格。每个块运行在一个流式多处理器（SM）上，拥有独立的共享内存分配。块之间在执行期间无法通信——它们是真正独立的。
 
-## 矩阵乘：综合起来
+将 `: block` 用于输出的最外层 tile 划分。如果输出为 `[128, 256]`，每个块处理 `[16, 16]` 的 tile，则需要 `128/16 × 256/16 = 8 × 16 = 128` 个块。
 
-借助 `parallel`、`dma.copy`、`chunkat` 与 `#`，分块矩阵乘已触手可及。这是本教程中首个真正体现 GPU「看家本领」的程序。
+### `: thread` — 块内线程
 
-计划如下：将 `[128, 256]` 矩阵与 `[256, 256]` 矩阵相乘，得到 `[128, 256]` 结果。输出划分为 block 网格；在每个 block 内，线程协作将 `lhs` 与 `rhs` 的 K 条带加载到 shared memory，再计算部分积。
+```choreo
+parallel {qx, qy} by [16, 16] : thread
+```
 
-**标量矩阵乘（无 DMA，仅 `parallel` 与 `.at()`）。**
+在所属块内创建 16 × 16 = 256 个线程。每个线程拥有独立的寄存器，但与同一块内的所有其他线程共享片上存储。
 
-从 `parallel` 与直接全局访问起步，无显式数据搬运：
+将 `: thread` 用于最细粒度的并行——tile 内的逐元素工作。
+
+### `: group` — Warp
+
+```choreo
+parallel w by 4 : group
+```
+
+创建 4 个 warp，每个包含 32 个线程。Warp 内的线程同步执行（所有 32 个线程同时执行相同指令）。Warp 级操作如 `mma.sync`（Ampere 时代的张量核心指令）在此粒度运作。
+
+### `: group-4` — Warpgroup
+
+```choreo
+parallel g by 2 : group-4
+```
+
+创建 2 个 warpgroup，每个包含 4 个 warp（128 个线程）。在 Hopper GPU（计算能力 9.0+）上，WGMMA 指令要求完整的 warpgroup 协同操作。即使只有一个 warpgroup（`parallel p by 1 : group-4`），标注也会告诉编译器这 128 个线程构成一个协作单元。
+
+每个块内放置多个 warpgroup，可以在不增加块数的情况下沿一个维度扩展工作量——两个 warpgroup 共享相同的共享内存，但维护独立的累加器。第 4 章将在张量核心操作中使用这一特性。
+
+### 嵌套标注符
+
+实际的内核会嵌套使用这些层级。常见模式：
+
+```choreo
+parallel {px, py} by [8, 16] : block {
+  parallel {qx, qy} by [16, 16] : thread {
+    // 128 个块 × 256 个线程 = 共 32,768 个线程
+  }
+}
+```
+
+外层 `parallel` 创建块网格，内层 `parallel` 在每个块内创建线程。花括号 `{px, py}` 引入多维索引——是两个嵌套 `parallel` 行的简写。
+
+### `shared` 如何实现数据复用
+
+空间标注符与内存标注符直接关联。回顾第 2 章，`dma.copy ... => shared` 将数据放入块级共享内存，而 `=> local` 则放入线程私有的本地内存。
+
+这个选择之所以重要，是因为数据复用。考虑一个块内所有线程都需要读取的 tile：
+
+![local 与 shared 内存复用对比](../assets/images/ch03/fig4_shared_reuse_dark.png#only-dark)
+![local 与 shared 内存复用对比](../assets/images/ch03/fig4_shared_reuse_light.png#only-light)
+
+*左：使用 `=> local`，每个线程加载自己的副本——4 倍带宽开销。右：使用 `=> shared`，一次 DMA 填充共享内存，所有线程从中读取——1 倍带宽开销。*
+
+经验法则：如果块内多个线程需要相同的数据，就放入 `shared`。如果每个线程的工作集是独立的，`local` 让数据更近，并避免共享内存的 bank 冲突。
+
+在本章后面的矩阵乘法中，`lhs` 和 `rhs` 的 K-tile 使用 `=> shared` 加载，因为块内全部 256 个线程都需要读取它们。输出累加器留在寄存器中（线程私有），因为每个线程只写自己的元素。
+
+## 类型系统旁注：`mdspan` 和 `ituple`
+
+在构建矩阵乘法之前，鳄霸类型系统的两个特性值得一提。你已经隐式地使用过它们了；现在正好给它们命名。
+
+**`mdspan`** — 鳄霸中的每个张量都将形状作为类型的一部分。当你写 `s32 [128, 256] lhs` 时，形状 `[128, 256]` 不是运行时值——它是编译期属性。编译器利用它来验证每一个 `.at()`、`chunkat` 和 `dma.copy` 在维度上的一致性。如果你对一个 2D 张量使用 `lhs.at(i, j, k)`，编译器会直接拒绝。表达式 `output.at(px#qx, py#qy)` 会被验证生成的索引在输出的边界范围内。
+
+`span(i)` 语法提取某一个维度：`lhs.span(0)` 是 128，`rhs.span(1)` 是 256。简写 `lhs.span` 复制整个形状。
+
+**`ituple`** — `parallel {px, py} by [8, 16]` 中的 `{px, py}` 语法引入了一个 `ituple`（编译期整数元组）。组合运算符 `px#qx` 将两个 ituple 元素组合为全局索引。范围运算符 `#p` 提取并行变量的范围。这些都在编译期解析——没有运行时开销。
+
+完整细节请参阅 [mdspan 参考](../documentation/shape-in-choreo.md) 和 [ituple 参考](../documentation/integer-ituple.md)。目前的关键要点是：鳄霸在编译期捕获形状不匹配，而非在运行时。
+
+## 矩阵乘法：综合运用
+
+有了 `parallel`、`foreach`、`dma.copy`、`chunkat`、`#` 和空间标注符，分块矩阵乘法就在眼前了。这是教程中第一个真正展示 GPU 强项的程序。
+
+计划：将 `[128, 256]` 矩阵乘以 `[256, 256]` 矩阵，得到 `[128, 256]` 的结果。
+
+### 标量矩阵乘法（无 DMA）
+
+先只用 `parallel` 和 `.at()`——全局内存，无显式数据搬运：
 
 ```choreo
 __co__ s32 [128, 256] matmul(s32 [128, 256] lhs, s32 [256, 256] rhs) {
@@ -69,25 +167,30 @@ __co__ s32 [128, 256] matmul(s32 [128, 256] lhs, s32 [256, 256] rhs) {
 }
 ```
 
-信息很密——下面说明各部分作用。
+![标量矩阵乘法输出分块网格](../assets/images/ch03/fig5_scalar_matmul_dark.png#only-dark)
+![标量矩阵乘法输出分块网格](../assets/images/ch03/fig5_scalar_matmul_light.png#only-light)
 
-**由操作数维度确定输出形状。** 行 `s32 [lhs.span(0), rhs.span(1)] output` 根据输入构造输出形状：`lhs.span(0)` 为 128（左矩阵行数），`rhs.span(1)` 为 256（右矩阵列数）。这是第 2 章中的 `span(i)` 语法——选取单维而非复制整个形状。
+*[128, 256] 输出被划分为 16 × 64 的 tile 网格。每个 (p, q) 对负责一个 tile。*
 
-**多轴并行。** `parallel p by 16, q by 64` 用逗号一次声明两个并行下标。由此得到 16 × 64 = 1024 路并行网格。每个 `(p, q)` 对拥有输出矩阵的一块分块。
+这段代码很紧凑——逐一解释各个部分。
 
-**命名元组解构。** `foreach index = {m, n, k} in [128 / #p, 256 / #q, 256]` 引入三个嵌套循环下标——`m`、`n`、`k`——并绑定到名为 `index` 的元组。各维趟数为：
+**从操作数维度推导输出形状。** `s32 [lhs.span(0), rhs.span(1)] output` 从输入构建输出形状：`lhs.span(0)` 是 128（左矩阵的行数），`rhs.span(1)` 是 256（右矩阵的列数）。
 
-- `128 / #p = 128 / 16 = 8`，每块行数
-- `256 / #q = 256 / 64 = 4`，每块列数
-- `256`，完整收缩维
+**多轴并行。** `parallel p by 16, q by 64` 用逗号声明两个并行索引。创建 16 × 64 = 1024 路并行网格。每个 `(p, q)` 对拥有输出矩阵的一个 tile。
 
-**组合后的全局下标。** `p#m` 与 `q#n` 将分块下标与块内偏移组合成全局位置（外层 # 内层，约定与第 2 章相同）。`p` 从 16 个行分块中选其一，`m` 在该分块内取 0..7，故 `p#m` 覆盖所有分块上的完整 0..127 行范围。
+**命名元组解构。** `foreach index = {m, n, k} in [128 / #p, 256 / #q, 256]` 引入三个嵌套循环索引——`m`、`n`、`k`——绑定到名为 `index` 的元组。迭代次数分别为：
 
-**算术。** `output.at(p#m, q#n) += lhs.at(p#m, k) * rhs.at(k, q#n)` 即教科书式的点积：对每个输出元素，沿 K 维求乘积之和。此处每次 `.at()` 均从全局内存读取——这正是需要 DMA 之处。
+- `128 / #p = 128 / 16 = 8` 行/tile
+- `256 / #q = 256 / 64 = 4` 列/tile
+- `256` 为完整的缩减维度
 
-**加入 DMA：分块置于 shared memory。**
+**组合全局索引。** `p#m` 将 tile 索引与 tile 内偏移组合。`p` 选择 16 个行 tile 中的哪一个，`m` 在该 tile 内从 0 到 7，因此 `p#m` 跨所有 tile 覆盖 0..127。
 
-标量版本可以工作，但每次乘法都从全局内存读取。先将 K 方向分块载入 shared memory，可使 block 内所有线程复用这些数据：
+**算术运算。** `output.at(p#m, q#n) += lhs.at(p#m, k) * rhs.at(k, q#n)` 是教科书式的点积：对每个输出元素，沿 K 维求积之和。这里每个 `.at()` 都从全局内存读取。
+
+### DMA 矩阵乘法：共享内存中的 Tile
+
+标量版本能工作，但每次乘法都从全局内存读取。将 K-tile 加载到共享内存，让块内所有线程复用它们：
 
 ```choreo
 __co__ s32 [128, 256] matmul(s32 [128, 256] lhs, s32 [256, 256] rhs) {
@@ -109,21 +212,37 @@ __co__ s32 [128, 256] matmul(s32 [128, 256] lhs, s32 [256, 256] rhs) {
 }
 ```
 
-变化要点：
+![DMA 矩阵乘法：线程块网格与共享内存及 K 循环](../assets/images/ch03/fig6_dma_matmul_dark.png#only-dark)
+![DMA 矩阵乘法：线程块网格与共享内存及 K 循环](../assets/images/ch03/fig6_dma_matmul_light.png#only-light)
 
-1. 外层 `parallel` 现采用花括号形式下标 `{px, py}` 并带 `: block`。8 × 16 的 block 网格覆盖输出。
+*一个块的详细视图：K 循环通过 `dma.copy` 将 lhs 和 rhs tile 加载到共享内存，然后 256 个线程从共享副本计算部分积。*
 
-2. 对 `tile_k` 的 `foreach` 沿 K 维走 16 步。每步用 `dma.copy ... => shared` 将 `lhs` 与 `rhs` 各一条带拷入 `shared` memory。目标为 `shared` 而非 `local`，因为 block 内所有线程需读取同一块分块。
+相比标量版本的变化：
 
-3. 内层 `parallel {qx, qy} by [16, 16] : thread` 在每个 block 内创建 256 个线程。每个线程在该 block 的分块内负责一个输出元素。
+1. 外层 `parallel` 现在使用 `: block` 和花括号索引 `{px, py}`。8 × 16 的块网格覆盖输出。
 
-4. 算术从 `lhs_load.data` 与 `rhs_load.data`——即 shared memory 中的副本——读取，而非从全局的 `lhs` 与 `rhs`。
+2. `foreach` 遍历 `tile_k`，沿 K 维分 16 步。每步通过 `dma.copy ... => shared` 将 `lhs` 和 `rhs` 的一个条带复制到 `shared` 内存中。
 
-组合下标现分两层：`px#qx` 将 block 下标 `px` 与线程下标 `qx` 组合成全局行；`py#qy` 对列同理。
+3. 内层 `parallel {qx, qy} by [16, 16] : thread` 在每个块内创建 256 个线程。每个线程负责块 tile 内的一个输出元素。
 
-**维度算术。** 在 `[8, 16]` 个 block 下，每个 block 拥有 `128/8 = 16` 行与 `256/16 = 16` 列。内层 `[16, 16]` 个线程将该区域再细分为每线程一个元素。沿 K 方向，16 个各含 `256/16 = 16` 个元素的分块覆盖完整收缩维。对每个 `tile_k`，`chunkat(px, tile_k)` 选取 block `px` 所拥有的行与 `tile_k` 所拥有的 K 区间；`chunkat(tile_k, py)` 选取 K 区间与 block `py` 所拥有的列。
+4. 算术运算读取 `lhs_load.data` 和 `rhs_load.data`——即共享内存中的副本——而非全局的 `lhs` 和 `rhs`。
 
-**主机端代码。** 主机侧仍采用相同的 `make_spandata` / `.view()` 模式：
+组合索引在两层上工作：`px#qx` 将块索引 `px` 与线程索引 `qx` 组合为全局行号；`py#qy` 对列做同样的操作。
+
+**维度计算。** `[8, 16]` 个块意味着每个块拥有 `128/8 = 16` 行和 `256/16 = 16` 列。内层 `[16, 16]` 个线程将其细分为每线程一个元素。沿 K 维，16 个 tile 各含 `256/16 = 16` 个元素，覆盖整个缩减维度。
+
+### GPU 资源布局
+
+以下是矩阵乘法代码如何映射到实际 GPU 硬件：
+
+![矩阵乘法代码映射到 GPU 资源](../assets/images/ch03/fig7_matmul_gpu_layout_dark.png#only-dark)
+![矩阵乘法代码映射到 GPU 资源](../assets/images/ch03/fig7_matmul_gpu_layout_light.png#only-light)
+
+*左：鳄霸代码，嵌套的 parallel 和 foreach。右：GPU 硬件——128 个块分布在各 SM 上，每个块拥有共享内存和 256 个线程。*
+
+### 宿主代码
+
+宿主端使用与前面章节相同的 `make_spandata` / `.view()` 模式：
 
 ```choreo
 int main() {
@@ -146,56 +265,30 @@ int main() {
 }
 ```
 
-这里没有新概念——`make_spandata` 创建缓冲区，`matmul(lhs.view(), rhs.view())` 调用鳄霸（Croktile）函数，三重循环与标量参考实现对照校验。主机程序保持平淡，以便鳄霸函数成为焦点。
+这里没有新内容。宿主程序保持无聊，好让鳄霸函数成为主角。
 
-## Warp group 与 `: group-4`
+## 追踪一个输出元素
 
-在 Hopper 级 GPU（计算能力 9.0+）上，NVIDIA 引入了 **warpgroup** 协作：四个 warp（128 个线程）共同发射宽矩阵指令。鳄霸（Croktile）将这一层次记为 `: group-4`：
+选取输出中的全局位置 `(row=37, col=50)`。它属于哪个块和哪个线程？
 
-```choreo
-parallel p by 1 : group-4 {
-  // body executes as a warpgroup of 128 threads
-}
-```
+块将 128 行分为 8 个 tile，每个 16 行：`px = 37 / 16 = 2`，偏移 `qx = 37 % 16 = 5`。列将 256 分为 16 个 tile，每个 16 列：`py = 50 / 16 = 3`，偏移 `qy = 50 % 16 = 2`。因此位于块 `(2, 3)`，线程 `(5, 2)`。
 
-即使并行计数为 1（一个 warpgroup 实例），`: group-4` 注解仍告知编译器：该体的 128 个线程构成协作单元，以执行 WGMMA 等指令。第 4 章在加入张量核心运算时会用到这一点。
+对于该线程，K 循环执行 16 次迭代。在 `tile_k = 0` 时，`dma.copy` 将 `lhs` 的第 32..47 行、K 列 0..15 加载到共享内存 `lhs_load`，将 `rhs` 的 K 行 0..15、列 48..63 加载到共享内存 `rhs_load`。内层 `foreach k in [16]` 对 k = 0..15 累加 `lhs_load.data.at(5, k) * rhs_load.data.at(k, 2)` 到 `output.at(37, 50)`。然后 `tile_k = 1` 加载下一个 K 条带，以此类推。全部 16 次迭代完成后，`output.at(37, 50)` 持有完整的点积——与标量参考值完全一致。
 
-也可在每个 block 内启动**多个** warpgroup：
-
-```choreo
-parallel p1 by 2 : group-4 {
-  // two warpgroups, indexed by p1 = 0 and p1 = 1
-}
-```
-
-这是在某一维上扩展 block 内工作量而不增加 block 数目的方式——两个 warpgroup 共享同一块 shared memory，但保持独立的累加器。第 4 章将据此展开。
-
-## `shared` 如何促成复用
-
-DMA 版矩阵乘选用 `=> shared` 而非 `=> local` 的原因在于：在内层循环中，`[16, 16]` 网格上的每个线程都从**同一**份 `lhs_load.data` 与 `rhs_load.data` 读取。线程 `(qx=3, qy=7)` 读取 `lhs_load.data.at(3, k)`——与线程 `(qx=3, qy=0)` 所读为同一行。若每线程在 `local` 中各持私有一份副本，同一数据会被加载 16 次（每个列线程各一次）。Shared memory 则为整个 block 只存一份。
-
-经验法则：若 block 内多个线程需要相同数据，将其拷入 `shared`。若每线程工作集相互独立，`local` 使数据更贴近计算并避免 shared memory 的 bank 争用。
-
-## 追踪单个输出元素
-
-在输出中取全局位置 `(row=37, col=50)`。它由哪个 block、哪个线程负责？
-
-行方向将 128 行分为 8 个各含 16 行的分块：`px = 37 / 16 = 2`，偏移 `qx = 37 % 16 = 5`。列方向将 256 分为 16 个各含 16 列的分块：`py = 50 / 16 = 3`，偏移 `qy = 50 % 16 = 2`。故为 block `(2, 3)`、线程 `(5, 2)`。
-
-对该线程而言，K 循环执行 16 次迭代。在迭代 `tile_k = 0` 时，`dma.copy` 将 `lhs` 的第 32..47 行与 K 列 0..15 载入 shared 的 `lhs_load`，将 `rhs` 的 K 行 0..15 与列 48..63 载入 shared 的 `rhs_load`。内层 `foreach k in [16]` 将 `lhs_load.data.at(5, k) * rhs_load.data.at(k, 2)` 在 k = 0..15 上累加到 `output.at(37, 50)`。接着 `tile_k = 1` 加载下一条 K 条带，依此类推。16 次迭代结束后，`output.at(37, 50)` 保存完整点积——与标量参考结果一致。
-
-## 新语法小结
+## 新语法总结
 
 | 语法 | 含义 |
-|--------|---------|
-| `parallel p by N` | N 路并行，下标 `p` 并发取 0..N-1 |
+|------|------|
+| `parallel p by N` | N 路并行，索引 `p` 从 0 到 N-1 并发执行 |
 | `parallel {px, py} by [M, N]` | 多维并行（笛卡尔积） |
-| `parallel p by N : block` | 映射到 CUDA thread block |
-| `parallel q by N : thread` | 映射到 block 内线程 |
-| `parallel w by N : group` | 映射到 warp（每 warp 32 线程） |
-| `parallel g by N : group-4` | 映射到 warpgroup（每组 128 线程） |
-| `=> shared` | DMA 目标：block 作用域的 shared memory |
-| `foreach index = {m, n, k} in [a, b, c]` | 在 `foreach` 中的命名元组解构 |
+| `parallel p by N : block` | 映射到 CUDA 线程块 |
+| `parallel q by N : thread` | 映射到块内线程 |
+| `parallel w by N : group` | 映射到 warp（每个 32 线程） |
+| `parallel g by N : group-4` | 映射到 warpgroup（每个 128 线程） |
+| `=> shared` | DMA 目标：块级共享内存 |
+| `foreach index = {m, n, k} in [a, b, c]` | 在 `foreach` 中使用命名元组解构 |
 | `parallel p by A, q by B` | 逗号分隔的并行轴 |
+| `lhs.span(0)` | 提取张量形状的某一个维度 |
+| `p#m` | 将外层 tile 索引 `p` 与内层偏移 `m` 组合 |
 
-本章构建的分块 DMA 矩阵乘是每一个高性能 GPU 内核的结构骨架。下一章将内层循环中的标量 `.at()` 算术替换为**张量核心（tensor-core）**运算——以单条指令处理 16×16×16 分块的硬件加速矩阵乘。
+本章构建的分块 DMA 矩阵乘法是每个高性能 GPU 内核的结构骨架。下一章将用**张量核心**操作替换内层循环中的标量 `.at()` 算术运算——硬件加速的矩阵乘法，能在单条指令中处理一个 16×16×16 的 tile。
