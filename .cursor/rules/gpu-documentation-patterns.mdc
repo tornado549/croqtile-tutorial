@@ -6,7 +6,7 @@ alwaysApply: false
 
 # GPU Documentation Patterns
 
-Sources: NVIDIA CUDA Programming Guide, AMD Composable Kernel docs, croktile-tutorial best practices
+Sources: NVIDIA CUDA Programming Guide, AMD Composable Kernel docs, croqtile-tutorial best practices
 
 ## Progressive Complexity
 

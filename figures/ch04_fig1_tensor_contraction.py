@@ -85,7 +85,7 @@ class TensorContraction(Scene):
             self.add(box, n, d)
 
         foot = Text(
-            "Croktile's mma syntax targets the abstract operation, not a specific chip.",
+            "Croqtile's mma syntax targets the abstract operation, not a specific chip.",
             font_size=11, color=C["fg3"], font="Monospace",
         )
         foot.to_edge(DOWN, buff=0.3)

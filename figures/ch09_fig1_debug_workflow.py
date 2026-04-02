@@ -17,7 +17,7 @@ class DebugWorkflow(Scene):
         self.camera.background_color = C["bg"]
 
         title = Text(
-            "Debugging Croktile kernels: narrowing order",
+            "Debugging Croqtile kernels: narrowing order",
             font_size=22,
             color=C["fg"],
             font="Monospace",

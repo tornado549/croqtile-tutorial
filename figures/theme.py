@@ -1,5 +1,5 @@
 """
-Shared color palettes for Croktile tutorial figures.
+Shared color palettes for Croqtile tutorial figures.
 Provides dark and light themes so every Manim script can generate
 two variants that toggle with MkDocs Material's #only-dark / #only-light.
 """

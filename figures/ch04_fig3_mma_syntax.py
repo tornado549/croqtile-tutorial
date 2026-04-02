@@ -15,7 +15,7 @@ class MMASyntax(Scene):
         self.camera.background_color = C["bg"]
 
         title = Text(
-            "Croktile's Four-Step MMA Syntax",
+            "Croqtile's Four-Step MMA Syntax",
             font_size=22, color=C["fg"], font="Monospace",
         )
         title.to_edge(UP, buff=0.3)

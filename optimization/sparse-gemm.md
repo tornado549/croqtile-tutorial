@@ -1,4 +1,4 @@
-# How to Optimize a Croktile 2:4 Sparse GEMM: FP16 and E4M3 Worklog
+# How to Optimize a Croqtile 2:4 Sparse GEMM: FP16 and E4M3 Worklog
 
 In this post, I'll walk the optimization of structured 2:4 sparse GEMM on Hopper (SM90a), measured on H800 PCIe (114 SMs). One sparsity pattern, one metadata story, two math paths. The FP16 kernel goes from 368 to 655 TFLOPS; the E4M3 kernel goes from 671 to 1127 TFLOPS. The same ideas help both, but which concern binds first is different.
 
@@ -127,7 +127,7 @@ The FP16 story has a sharp boundary between what automation can find and what ne
 543 ─── hand .cu ─────────> 655 (iter143, TK128+TMA meta+split RHS)
 ```
 
-That is +18% from baseline to best `.co`, then +51% from iter120 to iter143 once you have CUDA-level control. The second leg is **different expressiveness**: Croktile's `.co` compiler chooses loop nests, register allocation, and async-proxy placement, but sparse GEMM couples operand TMA, metadata, and WGMMA batching with warpgroup barriers. When the compiler serializes metadata consumption with MMA in a way no single pragma fixes, you need `.cu` surface area.
+That is +18% from baseline to best `.co`, then +51% from iter120 to iter143 once you have CUDA-level control. The second leg is **different expressiveness**: Croqtile's `.co` compiler chooses loop nests, register allocation, and async-proxy placement, but sparse GEMM couples operand TMA, metadata, and WGMMA batching with warpgroup barriers. When the compiler serializes metadata consumption with MMA in a way no single pragma fixes, you need `.cu` surface area.
 
 E4M3 has no analogous cliff. The search stays in automation territory from 671 to 1127, with 3-stage and barrier work as the headline structural wins. The baseline's stronger TMA and layout choices mean the compiler had less to trip over.
 

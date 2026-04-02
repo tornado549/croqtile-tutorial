@@ -1,14 +1,14 @@
-# Croktile Coding Reference
+# Croqtile Coding Reference
 
-Welcome to the Croktile coding reference. This section provides exhaustive syntax and semantics documentation for **Croktile**, a C++ embedded DSL for high-performance kernel programming featuring easy-to-use syntax with zero-cost abstractions, comprehensive compile-time safety, first-class dynamic shapes, and an AI-tuning-friendly design.
+Welcome to the Croqtile coding reference. This section provides exhaustive syntax and semantics documentation for **Croqtile**, a C++ embedded DSL for high-performance kernel programming featuring easy-to-use syntax with zero-cost abstractions, comprehensive compile-time safety, first-class dynamic shapes, and an AI-tuning-friendly design.
 
 ## What You Will Find Here
 
-This reference covers every aspect of programming with Croktile:
+This reference covers every aspect of programming with Croqtile:
 
-1. **Program structure**: How Croktile programs are organized — the `__co__` function, host-side APIs, and C++ interoperability.
+1. **Program structure**: How Croqtile programs are organized — the `__co__` function, host-side APIs, and C++ interoperability.
 
-2. **Shaped data**: Croktile's type system for multi-dimensional tensors — shapes, MDSpan, spanned data, symbolic dimensions, and dynamic shapes.
+2. **Shaped data**: Croqtile's type system for multi-dimensional tensors — shapes, MDSpan, spanned data, symbolic dimensions, and dynamic shapes.
 
 3. **Loop and parallelism**: SPMD parallelism, loop control, tiling, and iteration constructs.
 

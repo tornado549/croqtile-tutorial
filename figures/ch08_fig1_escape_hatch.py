@@ -1,5 +1,5 @@
 """
-Figure 1: Croktile DSL wrapping a small __cpp__ island — verbatim injection point
+Figure 1: Croqtile DSL wrapping a small __cpp__ island — verbatim injection point
 for PTX / raw C++ below the choreographed abstraction.
 """
 import os
@@ -34,7 +34,7 @@ class Ch08Fig1EscapeHatch(Scene):
         sub.next_to(title, DOWN, buff=0.12)
         self.add(sub)
 
-        # Outer: Croktile layer
+        # Outer: Croqtile layer
         outer = RoundedRectangle(
             corner_radius=0.15,
             width=10.2,
@@ -46,7 +46,7 @@ class Ch08Fig1EscapeHatch(Scene):
         )
         outer.shift(DOWN * 0.15)
         outer_lbl = Text(
-            "Croktile (__co__, parallel, foreach, dma, mma, …)",
+            "Croqtile (__co__, parallel, foreach, dma, mma, …)",
             font_size=14,
             color=C["green"],
             font="Monospace",
@@ -101,7 +101,7 @@ class Ch08Fig1EscapeHatch(Scene):
             self.add(t)
 
         island_note = Text(
-            "PTX / C++ — not parsed by Croktile",
+            "PTX / C++ — not parsed by Croqtile",
             font_size=11,
             color=C["orange"],
             font="Monospace",

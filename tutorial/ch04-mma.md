@@ -16,10 +16,10 @@ What makes this hard for programmers is not the math but the **register layout**
 
 *Simplified view of how 32 threads in a warp own scattered register fragments of an MMA tile. The exact pattern is architecture-specific and deliberately opaque.*
 
-Croktile's design sidesteps this complexity entirely. Instead of exposing architecture-specific fragment types, it provides **four abstract operations** that work on opaque register tiles: **fill**, **load**, **multiply**, and **store**. These operations describe the same 2D contraction workflow regardless of which hardware backend runs them. The compiler handles fragment layouts, lane mappings, and instruction selection for the target architecture — you describe *what* contraction to perform, not *how* registers are scattered.
+Croqtile's design sidesteps this complexity entirely. Instead of exposing architecture-specific fragment types, it provides **four abstract operations** that work on opaque register tiles: **fill**, **load**, **multiply**, and **store**. These operations describe the same 2D contraction workflow regardless of which hardware backend runs them. The compiler handles fragment layouts, lane mappings, and instruction selection for the target architecture — you describe *what* contraction to perform, not *how* registers are scattered.
 
-![Croktile's four-step MMA syntax: fill, load, multiply, store](../assets/images/ch04/fig3_mma_syntax_dark.png#only-dark)
-![Croktile's four-step MMA syntax: fill, load, multiply, store](../assets/images/ch04/fig3_mma_syntax_light.png#only-light)
+![Croqtile's four-step MMA syntax: fill, load, multiply, store](../assets/images/ch04/fig3_mma_syntax_dark.png#only-dark)
+![Croqtile's four-step MMA syntax: fill, load, multiply, store](../assets/images/ch04/fig3_mma_syntax_light.png#only-light)
 
 *The four-step MMA syntax is an abstract interface — not hardwired to GPU tensor cores. Any DSA that supports 2D tile contraction can map to these operations.*
 
@@ -42,7 +42,7 @@ The four-step syntax stays the same regardless of how many threads cooperate on 
 
 ### One warp, one tile: the simplest MMA matmul
 
-On Ampere (SM86), tensor-core MMA is scoped to a **single warp** (32 threads). In Croktile, that corresponds to `: group`. Here is a complete FP16 matmul kernel where every `MATMUL_*` constant is 16, so one block tile equals one MMA tile:
+On Ampere (SM86), tensor-core MMA is scoped to a **single warp** (32 threads). In Croqtile, that corresponds to `: group`. Here is a complete FP16 matmul kernel where every `MATMUL_*` constant is 16, so one block tile equals one MMA tile:
 
 ```choreo
 __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, N] output) {
@@ -87,7 +87,7 @@ This kernel is simple because the cooperation scope is narrow: 32 threads, one w
 
 ### Widening the scope: warpgroups and WGMMA
 
-Hopper (SM90) adds **Warpgroup Matrix Multiply-Accumulate (WGMMA)**: the same C += A × B contraction, but issued cooperatively by **four warps** (128 threads). The hardware instruction is wider, the tiles are bigger, and throughput improves — but the four-step syntax does not change. The only thing that changes in Croktile is the space specifier: `: group-4` instead of `: group`.
+Hopper (SM90) adds **Warpgroup Matrix Multiply-Accumulate (WGMMA)**: the same C += A × B contraction, but issued cooperatively by **four warps** (128 threads). The hardware instruction is wider, the tiles are bigger, and throughput improves — but the four-step syntax does not change. The only thing that changes in Croqtile is the space specifier: `: group-4` instead of `: group`.
 
 ![Ampere vs Hopper MMA cooperation scope](../assets/images/ch04/fig4_sm86_vs_sm90_dark.png#only-dark)
 ![Ampere vs Hopper MMA cooperation scope](../assets/images/ch04/fig4_sm86_vs_sm90_light.png#only-light)
@@ -187,7 +187,7 @@ mma.row.row.sp mc, ma, mb, me;
 
 The `.sp` suffix adds the metadata operand; everything else is the same fill-load-multiply-store rhythm. Any layout combination works: `mma.row.col.sp`, etc. You load `me` from a separate metadata tensor alongside A and B.
 
-**Quantized operands with per-tile scaling.** FP8 operands (`f8_e4m3`, `f8_e5m2`) need per-tile dequantization so the accumulator stays numerically accurate. Croktile fuses the scaling into the contraction:
+**Quantized operands with per-tile scaling.** FP8 operands (`f8_e4m3`, `f8_e5m2`) need per-tile dequantization so the accumulator stays numerically accurate. Croqtile fuses the scaling into the contraction:
 
 ```choreo
 mma.row.row.scale mc, ma, mb, sc_a, sc_b;

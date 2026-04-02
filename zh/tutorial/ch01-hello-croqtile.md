@@ -1,4 +1,4 @@
-# Hello Croktile：从零到运行内核
+# Hello Croqtile：从零到运行内核
 
 你即将编写、编译并运行一个完整的鳄霸程序——对两个小矩阵进行逐元素加法。它故意不做任何花哨的事情：没有分块、没有 DMA、没有复杂的线程层次结构。那些都会在后面的章节中出现。现在唯一的目标是了解一个鳄霸程序的组成部分，以及它们如何连接在一起。
 
@@ -45,7 +45,7 @@ int main() {
 将此代码保存为 `ele_add.co`，编译并运行：
 
 ```bash
-croktile ele_add.co -o ele_add
+croqtile ele_add.co -o ele_add
 ./ele_add
 ```
 
@@ -118,17 +118,17 @@ auto res = ele_add(lhs.view(), rhs.view());
 鳄霸文件使用 `.co` 扩展名。编译器的使用方式类似 `gcc` 或 `clang`：
 
 ```bash
-croktile ele_add.co                          # 生成 a.out
-croktile ele_add.co -o ele_add               # 指定输出文件名
-croktile -es -t cuda ele_add.co -o out.cu    # 仅输出 CUDA 源码
+croqtile ele_add.co                          # 生成 a.out
+croqtile ele_add.co -o ele_add               # 指定输出文件名
+croqtile -es -t cuda ele_add.co -o out.cu    # 仅输出 CUDA 源码
 ```
 
 `-es` 标志在转译后停止，让你检查生成的 CUDA 代码。`-t` 标志选择目标平台。
 
-要查看所有可用选项，运行 `croktile --help`：
+要查看所有可用选项，运行 `croqtile --help`：
 
 ```bash
-croktile --help
+croqtile --help
 ```
 
 这会打印完整的编译器标志列表——输出命名、目标选择、详细度和诊断选项。值得浏览一遍，这样你在需要时知道有什么可用的。
@@ -143,10 +143,10 @@ croktile --help
 
 <div markdown>
 <video controls style="max-width: 100%; border-radius: 8px; margin: 1em 0;" class="only-dark">
-  <source src="/croktile-tutorial/assets/videos/ch01/compile_and_run_dark.mp4" type="video/mp4" />
+  <source src="/croqtile-tutorial/assets/videos/ch01/compile_and_run_dark.mp4" type="video/mp4" />
 </video>
 <video controls style="max-width: 100%; border-radius: 8px; margin: 1em 0;" class="only-light">
-  <source src="/croktile-tutorial/assets/videos/ch01/compile_and_run_light.mp4" type="video/mp4" />
+  <source src="/croqtile-tutorial/assets/videos/ch01/compile_and_run_light.mp4" type="video/mp4" />
 </video>
 </div>
 

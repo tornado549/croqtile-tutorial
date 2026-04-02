@@ -1,8 +1,8 @@
-# How to Optimize a Croktile Block-Scaled FP8 GEMM: a Worklog
+# How to Optimize a Croqtile Block-Scaled FP8 GEMM: a Worklog
 
 In this post, I'll optimize an FP8 E4M3 matrix multiply with **per-block scaling** on Hopper (SM90a), measured on H800 PCIe (114 SMs). Operands are E4M3, the accumulator stays in FP16, and along K every 128-element tile carries FP32 scale factors so inner products stay useful after quantization. This is the same family of tricks used in MXFP8-style training: FP8 for density, scales for fidelity.
 
-What makes block-scaled GEMM interesting for optimization is that **scales are first-class operands**. Every K-tile iteration pulls matrix data **and** scale metadata. The Croktile surface expresses this as `mma.row.row.scale` instead of a plain `mma.row.row` — same tiling discipline, extra operands, same pressure to hide TMA latency, but with a third critical path (scale fetch) that does not exist in dense or 2:4 sparse GEMM.
+What makes block-scaled GEMM interesting for optimization is that **scales are first-class operands**. Every K-tile iteration pulls matrix data **and** scale metadata. The Croqtile surface expresses this as `mma.row.row.scale` instead of a plain `mma.row.row` — same tiling discipline, extra operands, same pressure to hide TMA latency, but with a third critical path (scale fetch) that does not exist in dense or 2:4 sparse GEMM.
 
 | Step | Kernel | TFLOPS @2k | TFLOPS @4k | Δ vs baseline @4k |
 | ---- | ------ | ---------- | ---------- | ----------------- |
@@ -103,7 +103,7 @@ Under `blockscale_gemm_v2/`, several `.co` files explore alternative scale movem
 | ------- | -------- |
 | `rhs_scale_dma_smem` / `scale_dma_smem` | Stage scales via TMA into shared memory |
 | `transposed_scale` | Change scale layout for coalescing vs index cost |
-| `tileN` | Tile along N explicitly in Croktile structure |
+| `tileN` | Tile along N explicitly in Croqtile structure |
 | `..._warpspec_persis_1p1c.co` | Persistent kernel variant ([Ch5](../tutorial/ch05-branch-control.md)) |
 
 These document that scale DMA to SMEM is a viable alternative when register pressure or load scheduling hurts WGMMA issue interval.
@@ -111,7 +111,7 @@ These document that scale DMA to SMEM is a viable alternative when register pres
 ## Reproduction
 
 ```bash
-./croktile -gs -t cute -arch=sm_90a --use-warpspec --stmatrix \
+./croqtile -gs -t cute -arch=sm_90a --use-warpspec --stmatrix \
   benchmark/performance/blockscale_gemm_v2/blockscale_gemm_e4m3_dyn_sm90_warpspec_1p1c.co \
   -o /tmp/bs.cute.result && bash /tmp/bs.cute.result --execute
 ```

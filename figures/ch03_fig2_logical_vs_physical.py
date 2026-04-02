@@ -1,5 +1,5 @@
 """
-Figure 2: Croktile's Two-Layer Parallelism Model.
+Figure 2: Croqtile's Two-Layer Parallelism Model.
 Left: logical parallel tree (parallel / foreach — what the programmer writes).
 Right: GPU hardware hierarchy (block > warpgroup > warp > thread).
 Arrows show the mapping via space specifiers.

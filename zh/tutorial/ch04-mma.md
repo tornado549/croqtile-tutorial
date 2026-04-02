@@ -16,10 +16,10 @@
 
 *warp 中 32 条线程如何持有 MMA tile 分散寄存器片段的简化示意。具体模式因架构而异且有意不透明。*
 
-鳄霸（Croktile）的设计完全绕开上述复杂性。它不暴露架构相关的 fragment 类型，而是提供作用于不透明寄存器 tile 的**四种抽象运算**：**fill**、**load**、**multiply**、**store**。无论由何种硬件后端执行，这些运算都描述同一套二维缩并工作流。编译器为目标架构处理 fragment 布局、lane 映射与指令选择——你描述的是*做何种*缩并，而非*寄存器如何*散布。
+鳄霸（Croqtile）的设计完全绕开上述复杂性。它不暴露架构相关的 fragment 类型，而是提供作用于不透明寄存器 tile 的**四种抽象运算**：**fill**、**load**、**multiply**、**store**。无论由何种硬件后端执行，这些运算都描述同一套二维缩并工作流。编译器为目标架构处理 fragment 布局、lane 映射与指令选择——你描述的是*做何种*缩并，而非*寄存器如何*散布。
 
-![Croktile's four-step MMA syntax: fill, load, multiply, store](../assets/images/ch04/fig3_mma_syntax_dark.png#only-dark)
-![Croktile's four-step MMA syntax: fill, load, multiply, store](../assets/images/ch04/fig3_mma_syntax_light.png#only-light)
+![Croqtile's four-step MMA syntax: fill, load, multiply, store](../assets/images/ch04/fig3_mma_syntax_dark.png#only-dark)
+![Croqtile's four-step MMA syntax: fill, load, multiply, store](../assets/images/ch04/fig3_mma_syntax_light.png#only-light)
 
 *四步 MMA 语法是抽象接口——并非硬绑定于 GPU tensor core。任何支持二维 tile 缩并的 DSA 均可映射到这些运算。*
 

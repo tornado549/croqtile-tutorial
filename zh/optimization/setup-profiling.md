@@ -9,8 +9,8 @@
 ```cpp
 int warmup = 10;
 int repeat = 500;
-const char* warmup_env = std::getenv("CROKTILE_TIMING_WARMUP");
-const char* repeat_env = std::getenv("CROKTILE_TIMING_REPEAT");
+const char* warmup_env = std::getenv("CROQTILE_TIMING_WARMUP");
+const char* repeat_env = std::getenv("CROQTILE_TIMING_REPEAT");
 if (warmup_env) { int value = std::atoi(warmup_env); if (value >= 0) warmup = value; }
 if (repeat_env) { int value = std::atoi(repeat_env); if (value > 0) repeat = value; }
 
@@ -70,19 +70,19 @@ std::cout << "HW efficiency: " << eff << "%\n";
 
 | 变量 | 默认值 | 作用 |
 | -------- | ------- | ------ |
-| `CROKTILE_TIMING_WARMUP` | `10` | 预热迭代次数（设为 0 则关闭预热） |
-| `CROKTILE_TIMING_REPEAT` | `500` | 计时的迭代次数（必须大于 0） |
-| `CROKTILE_DISABLE_TIMING` | 未设置 | 设为 `1` 则完全跳过计时 |
-| `CROKTILE_SKIP_VERIFY` | 未设置 | 设为 `1` 则跳过数值校验 |
+| `CROQTILE_TIMING_WARMUP` | `10` | 预热迭代次数（设为 0 则关闭预热） |
+| `CROQTILE_TIMING_REPEAT` | `500` | 计时的迭代次数（必须大于 0） |
+| `CROQTILE_DISABLE_TIMING` | 未设置 | 设为 `1` 则完全跳过计时 |
+| `CROQTILE_SKIP_VERIFY` | 未设置 | 设为 `1` 则跳过数值校验 |
 
-仅在确信正确性可靠时使用 `CROKTILE_SKIP_VERIFY=1`。错误但很快的内核会使优化搜索南辕北辙——在更改数据布局、精度或分块策略之后，务必重新启用校验。
+仅在确信正确性可靠时使用 `CROQTILE_SKIP_VERIFY=1`。错误但很快的内核会使优化搜索南辕北辙——在更改数据布局、精度或分块策略之后，务必重新启用校验。
 
 ## 编译与运行
 
 性能相关的 `.co` 文件通过鳄霸驱动构建。典型调用如下：
 
 ```bash
-./croktile -gs -t cute -arch=sm_90a --use-warpspec --stmatrix \
+./croqtile -gs -t cute -arch=sm_90a --use-warpspec --stmatrix \
   benchmark/performance/matmul/matmul_f16_dyn_sm90.co \
   -o /tmp/matmul.cute.result && bash /tmp/matmul.cute.result --execute
 ```

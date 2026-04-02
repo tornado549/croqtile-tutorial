@@ -1,57 +1,66 @@
 # 高级数据搬运：TMA、Swizzle 与不规则访问
 
-在 CPU 上，数据搬运几乎不可见。你写 `a[i] = b[j]`，剩下的由缓存层级包办——预取、一致性、淘汰。程序员关心的是*计算*；硬件关心的是*搬运*。在加速器上，这一抽象被打破。GPU 拥有显式的存储层级（寄存器、共享内存、L2、HBM），程序员必须主动编排数据在各层之间的搬运。随着硬件演进，搬运引擎本身也越来越复杂：DMA 单元让位于原生理解多维寻址的 **Tensor Memory Accelerator (TMA)**，而 **swizzle** 模式重新排列共享内存布局以避免 bank conflict——否则本应并行的访问会被硬件串行化。
+第 2 章将 `dma.copy` 介绍为鳄霸（Croqtile）的通用数据搬运原语——一种使用简单的 `src => dst` 箭头语法在存储空间之间搬运矩形 tile 的方式。在底层，DMA 拷贝是**软件驱动**的：warpgroup 中的每个线程都参与地址计算与载入发射。硬件看到的是每个线程一条独立的 load 指令，它们共同在 shared memory 中拼出一个 tile。
 
-对编程模型而言，挑战在于抽象这些引擎的同时不隐藏性能关键的选择。鳄霸（Croktile）使用统一的 `copy` 语法——`dma.copy` 和 `tma.copy` 共享相同的源/目标箭头记法——同时允许程序员在目标支持时选用硬件专有特性（swizzle 模式、描述符驱动加载）。
+这样做可行，但会损失性能。随着 GPU 演进，NVIDIA 为批量张量搬运引入了专用硬件：**Tensor Memory Accelerator (TMA)**。TMA 并非编程抽象——它是 Hopper（SM90+）GPU 上的物理硬件单元，位于 L2 cache / shared memory 接口附近。与线程协作发射 load 不同，单个线程发出一条**基于描述符**的指令，TMA 硬件负责其余一切：多维地址计算、边界钳位以及实际数据传输。软件线程可去做其他工作（或根本不存在——TMA 引擎独立运行）。
 
-第 6 章完成了**安全流水线**的闭环：生产者、消费者、事件与双缓冲。该章所有传输均为**软件驱动**的 DMA。本章引入硬件加速的替代方案以及处理现实边界情况的不规则访问工具。
+为何鳄霸需要为此单独抽象？因为 TMA 不只是「更快的 DMA」，其性质根本不同：
 
-![软件 DMA 与 TMA 对比：线程协作载入 vs 描述符驱动的硬件张量拷贝](../assets/images/ch07/fig1_tma_vs_dma_dark.png#only-dark)
-![软件 DMA 与 TMA 对比：线程协作载入 vs 描述符驱动的硬件张量拷贝](../assets/images/ch07/fig1_tma_vs_dma_light.png#only-light)
+- **描述符（Descriptors）。** TMA 使用预先构建的张量描述符，编码基指针、维度、步长与 swizzle 模式。编译器根据你的 `__co__` 签名与全局布局构建该描述符。
+- **Swizzle。** TMA 可在传输过程中重排字节，以避免 shared-memory bank 冲突。该 swizzle 模式固化在描述符中，且必须与 MMA 操作数 load 如何解释布局相匹配。DMA 不存在这种耦合。
+- **单线程发起。** 与整个 warpgroup 参与的 DMA 不同，TMA 由单线程发出。这会改变生产者的寄存器压力与调度需求。
+
+鳄霸通过与 DMA 相同的箭头语法暴露 TMA——用 `tma.copy` 代替 `dma.copy`——但 swizzle 耦合与描述符语义使其成为独立原语。本章其余部分介绍 TMA、swizzle，以及处理现实边界情况的不规则访问工具。
 
 ## `tma.copy`：硬件张量搬运
 
-表面语法与 `dma.copy` 几乎一致：
+表面语法与 `dma.copy` 一致：
 
 ```choreo
 tma.copy lhs.subspan(WARP_M, TILE_K).at(block_m, iv_k) => lhs_load_s;
 ```
 
-**相同的箭头，全新的引擎。** 这行代码看起来像 `dma.copy`，但工作的承担者从**软件**转向了**硬件**：
+相同的源表达式，相同的 `=>` 目标形式。区别在于**由谁完成工作**：
 
-- **DMA 路径。** 线程**协作**覆盖 tile：每条 lane 参与**地址运算**和载入发射。吞吐量取决于你能否让这些载入**避开 bank 冲突**——这本身就是一场持续的战斗。
-- **TMA 路径。** 一个逻辑上**基于描述符**的操作描述了张量切片；**TMA** 将其展开为正确的**多维**寻址，并将**整个 tile** 作为一个单元搬运。生产者 warp 可以**重叠**其他工作，甚至可以用更精简的启动模式——因为**硬件**而非整个 warp 的线程拥有传输语义。
+![TMA descriptor to hardware tile fetch: descriptor fields, TMA unit, and SMEM tile](../assets/images/ch07/fig3_tma_descriptor_dark.png#only-dark)
+![TMA descriptor to hardware tile fetch: descriptor fields, TMA unit, and SMEM tile](../assets/images/ch07/fig3_tma_descriptor_light.png#only-light)
 
-**好处。** 你仍然通过**事件**或与第 6 章相同的流水线纪律在**整个 tile** 上**同步**，但不再需要操作数 ingress 的**逐线程**载入编排。编译器根据 `__co__` 签名和全局布局构建**张量描述符**；在典型内核中你只需把原来写 `dma.copy` 的地方改写为 `tma.copy`。
+- **DMA 路径。** 线程协作覆盖 tile；每条 lane 参与地址运算与 load 发射。吞吐量取决于你能在多大程度上让这些 load 对 bank 友好。
+- **TMA 路径。** 一次基于描述符的操作描述张量切片；TMA 硬件将其展开为多维寻址，并将整个 tile 作为单元搬运。生产者线程可与其他工作重叠，因为拥有传输的是硬件，而非一整 warp 的线程。
 
-## Swizzle 与 Bank Conflict
+**收益。** 你仍对整个 tile 同步（通过事件或第 6 章中的流水线纪律），但省去了逐线程的 load 编排。编译器根据你的 `__co__` 签名与全局布局构建张量描述符。
 
-共享内存被**条带化为 bank**（32 个 bank，常见路径上每 bank 4 字节）。当一个 warp 中**多条 lane** 在同一周期内触及**映射到同一 bank 的不同地址**时，硬件会**串行化**这些访问——即 **bank conflict**。稠密的**行优先** tile 中，连续的列往往恰好落在 warp 的连续 lane 所需的位置，容易产生 **2-way、4-way 乃至更严重**的冲突，大幅**削减有效带宽**。
+![Software DMA vs TMA: cooperative thread loads vs descriptor-driven hardware tensor copy](../assets/images/ch07/fig1_tma_vs_dma_dark.png#only-dark)
+![Software DMA vs TMA: cooperative thread loads vs descriptor-driven hardware tensor copy](../assets/images/ch07/fig1_tma_vs_dma_light.png#only-light)
 
-**Swizzle** 对每行内的列索引施加一个**固定 XOR 重映射**，使线程**实际读取**的布局将访问分散到不同 bank。鳄霸在 copy 和 MMA load 上同时暴露了这一选项，确保 **ingress 与数学运算一致**：
+## Swizzle 与 bank 冲突
+
+Shared memory 被条带化为 **32 个 bank**（每 bank 4 字节）。当同一 warp 中多条 lane 在同一周期访问映射到同一 bank 的不同地址时，硬件会**串行化**这些访问——即 **bank conflict**。稠密行优先 tile 常产生 2-way、4-way 或更严重的冲突，从而降低有效带宽。
+
+**Swizzle** 对每行内的列索引施加固定的类 XOR 重映射，使访问分散到各 bank。鳄霸在 copy 与 MMA load 上均暴露该机制，使 ingress 与数学运算一致：
 
 ```choreo
 tma.copy.swiz<3> src => dst;
 ```
 
-**Ingress。** copy 按 swizzle 模式 **`N`** 把数据落入共享内存。
+**数据入站。** 拷贝按 swizzle 模式 `N` 将字节落入 shared memory。
 
 ```choreo
 ma = mma.load.swiz<3> lhs_load_s.chunkat(_, iv_warp);
 ```
 
-**MMA 读取路径。** 操作数载入必须使用**相同的** **`swiz<N>`**，否则地址不匹配。
+**MMA 读取路径。** 操作数 load 必须使用相同的 `swiz<N>`，以使地址与暂存布局匹配。
 
-**Swizzle 级别。** 模板参数控制**粒度**：`swiz<0>` 为恒等映射，`<1>`、`<2>`、`<3>` 分别对应 **64 B、128 B 和 256 B** 的 XOR 模式。更大的粒度可以消除**更宽**的冲突模式，但要求 **tile 尺寸**与该粒度对齐。
+**Swizzle 级别。** 模板参数设定粒度：`swiz<0>` 为恒等，随后 `<1>`、`<2>`、`<3>` 分别为 64B、128B、256B 的 XOR 模式。更大粒度可消除更宽的冲突模式，但要求 tile 范围与该粒度对齐。
 
-**匹配规则。** **`tma.copy.swiz<N>`** 的 `<N>` 必须与 **`mma.load.swiz<N>`** 一致。如果你用 plain `mma.load` 去读 **`swiz<3>`** 布局的数据，地址不匹配，读出来的就是**垃圾**。编译器**不会**强制这一配对——这是你自行维护的**正确性不变量**。(如[第 4 章](ch04-mma.md)所述，`mma.load.swiz<N>` 属于 MMA 加载家族。)
+**匹配规则。** `tma.copy.swiz<N>` 上的 `<N>` 必须与 `mma.load.swiz<N>` 一致。若从 `swiz<3>` 的数据用普通 `mma.load` 读取，地址不一致，会得到错误结果。编译器不强制该配对——这是你需维护的正确性不变量。（如[第 4 章](ch04-mma.md#new-syntax)所述，`mma.load.swiz<N>` 属于 MMA load 族。）
 
-![无 swizzle 的 bank 冲突 vs XOR swizzle 将 warp lane 分散到各 bank](../assets/images/ch07/fig2_swizzle_dark.png#only-dark)
-![无 swizzle 的 bank 冲突 vs XOR swizzle 将 warp lane 分散到各 bank](../assets/images/ch07/fig2_swizzle_light.png#only-light)
+![Bank conflicts without swizzle vs XOR swizzle spreading warp lanes across banks](../assets/images/ch07/fig2_swizzle_dark.png#only-dark)
+![Bank conflicts without swizzle vs XOR swizzle spreading warp lanes across banks](../assets/images/ch07/fig2_swizzle_light.png#only-light)
 
-## TMA 流水线矩阵乘法
+## 流水线矩阵乘法中的 TMA
 
-流水线**骨架**与第 6 章相同：**stage 环**、**`wait` / `trigger` 事件**、**MMA commit**，以及**消费者**在**生产者**填充下一个槽位时消耗 tile。这里生产者将 **`dma.copy`** 替换为 **`tma.copy.swiz<3>`**，消费者将 **`mma.load`** 替换为 **`mma.load.swiz<3>`**。下面是一个使用相同 **1P1C** 分工（`parallel p1 by 2 : group-4`）的 **Hopper FP16** 矩阵乘法示例：
+第 6 章的流水线骨架不变：stage 环、`wait` / `trigger` 事件、MMA commit，消费者在生产者填充下一槽时排空 tile。此处生产者将 `dma.copy` 换为 `tma.copy.swiz<3>`，消费者将 `mma.load` 换为 `mma.load.swiz<3>`：
 
 ```choreo
 __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, N] output) {
@@ -97,65 +106,72 @@ __co__ void matmul(global f16 [M, K] lhs, global f16 [N, K] rhs, global f16 [M, 
 }
 ```
 
-**流水线对等性。** 与第 6 章 **`dma.copy`** 版本相比，只有 **ingress** 和**操作数载入**行发生了变化；**event**、**staging 索引**和 **commit** 保持不变。**TMA** 去除了载入上的协作式**逐线程**地址运算；**swizzle** 将共享内存布局与 **MMA** 访问模式对齐。**writeback** 到全局内存此处仍使用 **`dma.copy`**——根据目标架构和编译器支持选择 TMA 或 DMA 做 store。
+与第 6 章的 `dma.copy` 版本相比，仅 ingress 与操作数 load 行发生变化；事件、staging 索引与 commit 保持不变。写回全局内存仍使用 `dma.copy`——按目标平台选择 TMA 或 DMA 进行 store。
 
 ## 处理不规则访问
 
-使用 **`chunkat`** 和 **`subspan(...).at(...)`** 的均匀 tiling 可以覆盖许多内核。实际工作负载还需要**任意偏移的窗口**、**tile 间的步长**、边界处的**部分 tile**以及**布局重解释**——以下小节将这些工具集中在一个标题下。
+使用 `chunkat` 与 `subspan(...).at(...)` 的均匀 tiling 可覆盖许多内核。实际工作负载还需要任意偏移的窗口、tile 之间的步长、边界处的部分 tile 以及布局重解释。以下小节汇总这些工具。
 
-### 任意偏移窗口：`view` 和 `from`
+### 任意偏移窗口：`view` 与 `from`
 
-**`view(M, N).from(row, col)`** 定义了一个 **`M × N`** 矩形，起始于底层张量的 **`(row, col)`** 位置——**不要求**原点与预先计算的 tile 网格对齐。
+`view(M, N).from(row, col)` 定义从 `(row, col)` 起算的 `M x N` 矩形——不要求原点与预先计算的 tile 网格对齐。
 
 ```choreo
 patch = matrix.view(16, 16).from(37, 50);
 ```
 
-**固定窗口，自由原点。** 这是一个起始于第 **`37`** 行、第 **`50`** 列的 **`[16, 16]`** 切片——**不要求**对齐（如果窗口越过张量边缘，使用 **`.zfill`**）。
+这是从第 37 行、第 50 列开始的 `[16, 16]` 切片。不要求对齐。
 
-**何时使用。** **`chunkat`** 需要张量被均匀分为固定数量的 chunk；**`view(...).from(...)`** 则不需要。**规则** tiling 用 **`chunkat`**，窗口是**锯齿状**或**运行时定位**的场景用 **`view` / `from`**。
+![chunkat (aligned grid) vs view/from (arbitrary offset window)](../assets/images/ch07/fig4_view_from_dark.png#only-dark)
+![chunkat (aligned grid) vs view/from (arbitrary offset window)](../assets/images/ch07/fig4_view_from_light.png#only-light)
+
+**何时使用。** `chunkat` 要求张量被均匀划分；`view(...).from(...)` 则不要求。规则 tiling 优先用 `chunkat`；窗口参差不齐或由运行时定位时用 `view` / `from`。
 
 ```choreo
 expert_lhs = lhs.view(expert_M, K).from(expert_offset, 0);
 dma.copy expert_lhs.subspan(WARP_M, TILE_K).at(block_m, iv_k) => shared;
 ```
 
-**MoE 风格 GEMM。** 在**混合专家**架构中，每个专家的 token 批次通常起始于一个**动态行** `expert_offset`。使用 **`view` / `from`** 切片后，流水线的其余部分——DMA 或 TMA、MMA、event——**无需修改**。
+在 mixture-of-experts 堆栈中，每个专家的 token 批次起始于动态行 `expert_offset`。用 `view` / `from` 切片可在流水线其余部分——DMA、MMA、事件——保持不变的情况下重接操作数。
 
-### 步长 tile：`.subspan`、`.step` 和 `.at`
+### 步长 tile：`.subspan`、`.step` 与 `.at`
 
-**`subspan(M, K).at(i, j)`** 选取锚定在逻辑 tile 索引 **`(i, j)`** 处、尺寸为 **`[M, K]`** 的 tile。添加 **`.step(sM, sK)`** 使 tile 按 **`sM`** 行、**`sK`** 列的间距排列，而非紧密排列：
+`subspan(M, K).at(i, j)` 选取逻辑 tile 索引 `(i, j)` 处、范围为 `[M, K]` 的 tile。添加 `.step(sM, sK)` 可使 tile 相隔 `sM` 行与 `sK` 列，而非紧密相邻：
 
 ```choreo
 matrix.subspan(16, 16).step(32, 32).at(i, j);
 ```
 
-**步长 tiling。** 相邻 tile 索引在**全局**坐标中推进 **`(sM, sK)`**，不一定等于 tile 大小。
+![Packed tiling vs strided tiling with .step](../assets/images/ch07/fig5_subspan_step_dark.png#only-dark)
+![Packed tiling vs strided tiling with .step](../assets/images/ch07/fig5_subspan_step_light.png#only-light)
 
-**`.step` 的含义。** Tile **`(0, 0)`** 仍从 **`(0, 0)`** 开始，但 tile **`(1, 0)`** 从 **`(32, 0)`** 开始，**`(0, 1)`** 从 **`(0, 32)`** 开始。省略 **`.step`** 时步长等于各轴的 **tile 大小**——即**紧密排列**情形。
+Tile `(0,0)` 从 `(0,0)` 开始，但 tile `(1,0)` 从 `(32,0)` 开始，`(0,1)` 从 `(0,32)` 开始。省略 `.step` 时步长等于 tile 尺寸——即紧密排列情形。
 
-**典型用途：** 跳过**填充或保护带**、step 小于 extent 的**重叠** stencil、或匹配非紧密 tile-major 的**外层布局**。
+**典型用途：** 跳过 padding 或保护带；步长小于范围的重叠 stencil；或匹配非稠密 tile-major 的外层布局。
 
 ### 零填充：`.zfill`
 
-当 **`M` 或 `K`** 不是 tile 大小的**整数倍**时，沿某轴的**最后一个** tile 是**部分**的。越过张量边界的读取是**未定义行为**，除非你显式**填充**。
+当 `M` 或 `K` 不是 tile 大小的整数倍时，沿某轴的最后一个 tile 为部分 tile。除非显式填充，否则越过张量边界的读取是未定义的。
 
 ```choreo
 tma.copy.swiz<3> lhs.subspan(WARP_M, TILE_K).at(block_m, iv_k).zfill
   => lhs_load_s;
 ```
 
-**语义。** **`.zfill`** 作用于 copy 的**源端**：超出范围的元素在目标 tile 中被**写为零**。零对 GEMM 累加**无贡献**，因此 **MMA 循环**可以保持**统一**，同时在数学上对**部分**边界仍然**正确**。
+`.zfill` 作用于 copy 的源侧：越界元素在目标 tile 中写为零。零对 GEMM 累加无贡献，故 MMA 循环可保持统一，同时在部分边界上仍数学正确。
+
+![.zfill: zero-padding partial tiles at the tensor boundary](../assets/images/ch07/fig6_zfill_dark.png#only-dark)
+![.zfill: zero-padding partial tiles at the tensor boundary](../assets/images/ch07/fig6_zfill_light.png#only-light)
 
 ### 布局重解释：`span_as`
 
-**`span_as`** 将一个 buffer 的线性存储**重解释**为另一个具有**相同元素数**的**形状**——**不做**拷贝。
+`span_as` 将 buffer 的线性存储重解释为另一形状，元素个数相同——无拷贝。
 
 ```choreo
 flat_buffer.span_as([rows, cols])
 ```
 
-**仅视图的 reshape。** 元素数量保持不变；只有**逻辑** rank 改变。
+元素个数不变；仅逻辑秩改变。
 
 ```choreo
 strip_load = dma.copy data.chunkat(tile) => shared;
@@ -163,34 +179,33 @@ tile_2d = strip_load.data.span_as([tile_m, tile_k]);
 ma = mma.load tile_2d.chunkat(_, iv_warp);
 ```
 
-**1D staging 到 2D MMA。** **`span_as`** 将已载入的条带暴露为一个**矩阵**供 **`chunkat`** 使用，无需额外拷贝。
+这样可将已载入的一维条带暴露为矩阵供 `chunkat` 使用，无需额外拷贝。`rows * cols` 必须等于底层存储的 span 长度，否则编译器拒绝该程序。
 
-**契约。** **`rows * cols`** 必须等于底层存储的 **span 长度**，否则编译器**拒绝**该程序。
+![span_as: zero-copy shape reinterpretation from 1D to 2D](../assets/images/ch07/fig7_span_as_dark.png#only-dark)
+![span_as: zero-copy shape reinterpretation from 1D to 2D](../assets/images/ch07/fig7_span_as_light.png#only-light)
 
 ## 本章小结
 
-| 概念 | 在"高级数据搬运"中的角色 |
-|------|--------------------------------------|
-| **`dma.copy`（第 6 章）** | 软件驱动的流水线载入——线程 + 地址运算；作为对比基线。 |
-| **`tma.copy` / `tma.copy.swiz<N>`** | 基于描述符的 **Hopper** ingress；硬件**多维** tile 搬运，**极少线程开销**。 |
-| **Swizzle + `mma.load.swiz<N>`** | 使**共享内存布局**与 **MMA** 读取对齐；通过 **XOR** 重映射避免 **bank conflict**——copy 和 load 上的 `N` **必须匹配**。 |
-| **`view` / `from`** | **任意偏移**的矩形窗口，用于**锯齿状**或**运行时**切片起点。 |
-| **`.subspan(...).step(...).at(...)`** | **步长** tiling——重叠、跳过填充或非紧密布局。 |
-| **`.zfill`** | 在 copy 中对越界元素**零填充**，安全处理**部分 tile**。 |
-| **`span_as`** | **零拷贝**的形状**重解释**，用于 staging buffer。 |
+| 概念 | 语法 | 作用 |
+|---------|--------|------|
+| 软件 DMA（第 2、6 章） | `dma.copy` | 线程协作的 tile 传输；基线 |
+| 硬件 TMA | `tma.copy` / `tma.copy.swiz<N>` | 基于描述符的 Hopper 入站；线程开销极小 |
+| Swizzle | `mma.load.swiz<N>` | 使 SMEM 布局与 MMA 读取一致；copy 与 load 上 `N` 须匹配 |
+| 任意窗口 | `view(M,N).from(r,c)` | 参差不齐或由运行时定位的切片 |
+| 步长 tiling | `.subspan().step().at()` | 非紧密布局、重叠 stencil |
+| 部分 tile | `.zfill` | 越界元素零填充 |
+| 形状重解释 | `span_as([dims])` | 对 staging buffer 的零拷贝形状重塑 |
 
-## 新语法速查
+## 新语法
 
 | 语法 | 含义 |
 |--------|---------|
 | `tma.copy src => dst` | TMA 硬件张量拷贝 |
 | `tma.copy.swiz<N> src => dst` | 带 swizzle 模式 `N`（0–3）的 TMA 拷贝 |
-| `mma.load.swiz<N> src` | 与 swizzle `N` 一致的 MMA 操作数载入 |
-| `tensor.view(M, N).from(r, c)` | 任意偏移的 `M × N` 窗口 |
+| `mma.load.swiz<N> src` | 与 swizzle `N` 一致的 MMA 操作数 load |
+| `tensor.view(M, N).from(r, c)` | 任意偏移的 `M x N` 窗口 |
 | `.subspan(M, K).step(sM, sK).at(i, j)` | 步长 tile 选取 |
-| `.zfill` | copy 源端越界元素零填充 |
-| `span_as([dims])` | 将线性存储重解释为指定形状的张量 |
-| `parallel.async ... : block` | 非阻塞异步内核启动（见[第 5 章](ch05-branch-control.md)） |
-| `stream s` | 将 kernel body 绑定到 CUDA stream `s`（见[第 5 章](ch05-branch-control.md)） |
+| `.zfill` | 在 copy 源侧对越界元素零填充 |
+| `span_as([dims])` | 将线性存储重解释为带形状的张量 |
 
-[下一章](ch08-cpp-interop.md)从纯鳄霸编排跨入 **C++ 互操作**：**寄存器提示**、**预处理器保护**和**内联 PTX**——当你需要在生成代码旁边**降到底层**时的手段。
+[下一章](ch08-cpp-interop.md)从纯鳄霸迈向 **C++ 互操作**：`__device__` 函数、**寄存器提示**、**预处理器保护**，以及需要贴近硬件时使用的**内联 PTX**。

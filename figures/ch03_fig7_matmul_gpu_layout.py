@@ -20,7 +20,7 @@ class MatmulGpuLayout(Scene):
         self.add(title)
 
         # --- Left: Code structure ---
-        code_title = Text("Croktile Code", font_size=14, color=C["blue"],
+        code_title = Text("Croqtile Code", font_size=14, color=C["blue"],
                            font="Monospace")
         code_title.move_to(LEFT * 4.5 + UP * 2.2)
         self.add(code_title)

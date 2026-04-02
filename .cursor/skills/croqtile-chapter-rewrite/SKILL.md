@@ -1,16 +1,16 @@
 ---
-name: croktile-chapter-rewrite
+name: croqtile-chapter-rewrite
 description: >-
-  Rewrites Croktile tutorial chapters (ch01–ch09) to match the storytelling,
+  Rewrites Croqtile tutorial chapters (ch01–ch09) to match the storytelling,
   figure, and structure standards established in ch02 and ch03. Use when
   rewriting, reviewing, or restructuring any tutorial chapter, or when the
   user mentions chapter quality, chapter structure, or tutorial consistency.
 ---
 
-# Croktile Tutorial Chapter Rewrite Standard
+# Croqtile Tutorial Chapter Rewrite Standard
 
 This skill encodes the writing and structural conventions that emerged from
-human-reviewed iterations of Chapters 2 and 3 of the Croktile tutorial.
+human-reviewed iterations of Chapters 2 and 3 of the Croqtile tutorial.
 Apply these rules when rewriting or reviewing any tutorial chapter.
 
 ## 1. Opening Pattern (Mandatory)
@@ -34,22 +34,22 @@ The bridge is a single narrative sentence or short paragraph — not a bullet li
 
 ### Beat 2 — Concept Introduction (Storytelling)
 
-Before showing any Croktile syntax, explain the **concept itself** using
+Before showing any Croqtile syntax, explain the **concept itself** using
 general knowledge the reader can relate to:
 
 - What is this concept/model/mindset in the real world or in GPU hardware?
 - How do traditional tools (CUDA, OpenCL) handle it, and what makes it hard?
-- What is Croktile's key insight or design choice for this concept?
+- What is Croqtile's key insight or design choice for this concept?
 
 This section reads like a mini-essay — conversational, specific, opinionated.
 Avoid bullet-point walls. Use analogies, contrasts, and concrete numbers.
 
 > **Pattern** (ch02): "A GPU does not fetch one 32-bit integer from memory at a
 > time. It fetches contiguous blocks — 128 bytes, 256 bytes — in a single
-> transaction… Croktile is designed around this insight."
+> transaction… Croqtile is designed around this insight."
 
 > **Pattern** (ch03): "Parallelism is a virtual concept… CUDA conflates logical
-> structure and physical mapping… Croktile untangles them."
+> structure and physical mapping… Croqtile untangles them."
 
 ## 2. Single Storyline per Chapter
 

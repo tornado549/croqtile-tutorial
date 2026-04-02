@@ -20,8 +20,8 @@
 克隆仓库并运行自动化安装：
 
 ```bash
-git clone https://github.com/codes1gn/croktile.git
-cd croktile
+git clone https://github.com/codes1gn/croqtile.git
+cd croqtile
 make setup-core
 ```
 
@@ -37,7 +37,7 @@ make
 make test
 ```
 
-如果所有测试通过，`croktile` 二进制文件已就绪，位于构建目录中。将其添加到 `PATH` 或使用完整路径调用。
+如果所有测试通过，`croqtile` 二进制文件已就绪，位于构建目录中。将其添加到 `PATH` 或使用完整路径调用。
 
 ## 验证安装
 
@@ -64,7 +64,7 @@ int main() {
 编译并运行：
 
 ```bash
-croktile verify.co -o verify
+croqtile verify.co -o verify
 ./verify
 ```
 
@@ -72,13 +72,13 @@ croktile verify.co -o verify
 
 ## 编译器用法
 
-`croktile` 命令的使用方式类似 `gcc` 或 `clang`：
+`croqtile` 命令的使用方式类似 `gcc` 或 `clang`：
 
 ```bash
-croktile program.co                     # 编译并链接 → a.out
-croktile program.co -o my_kernel        # 指定输出文件名
-croktile -es -t cuda program.co -o out.cu  # 仅输出 CUDA 源码
-croktile -E program.co                  # 仅预处理
+croqtile program.co                     # 编译并链接 → a.out
+croqtile program.co -o my_kernel        # 指定输出文件名
+croqtile -es -t cuda program.co -o out.cu  # 仅输出 CUDA 源码
+croqtile -E program.co                  # 仅预处理
 ```
 
 主要标志：
@@ -106,4 +106,4 @@ make sample-test-operator OPERATOR=add # 测试特定算子
 
 当你修改鳄霸本身或想要验证特定算子族时，这些快捷方式非常有用。
 
-编译器安装并验证完毕后，你已准备好在[第 1 章](ch01-hello-croktile.md)中编写你的第一个真正的鳄霸程序。
+编译器安装并验证完毕后，你已准备好在[第 1 章](ch01-hello-croqtile.md)中编写你的第一个真正的鳄霸程序。

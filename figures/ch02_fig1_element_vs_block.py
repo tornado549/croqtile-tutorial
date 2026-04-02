@@ -25,7 +25,7 @@ class ElementVsBlock(Scene):
         title_right.move_to(RIGHT * 3.5 + UP * 3.2)
 
         subtitle_left = Text("(CUDA / SIMD style)", font_size=18, color=C["fg2"], font="Monospace")
-        subtitle_right = Text("(Croktile style)", font_size=18, color=C["fg2"], font="Monospace")
+        subtitle_right = Text("(Croqtile style)", font_size=18, color=C["fg2"], font="Monospace")
         subtitle_left.next_to(title_left, DOWN, buff=0.15)
         subtitle_right.next_to(title_right, DOWN, buff=0.15)
 

@@ -106,7 +106,7 @@ class SM86vsSM90(Scene):
         self.add(vs)
 
         foot = Text(
-            "Croktile maps : group vs : group-4 to the correct register groups and barriers.",
+            "Croqtile maps : group vs : group-4 to the correct register groups and barriers.",
             font_size=11,
             color=C["fg3"],
             font="Monospace",

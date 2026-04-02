@@ -1,12 +1,12 @@
-# Parallelism: How Croktile Represents Parallel Work
+# Parallelism: How Croqtile Represents Parallel Work
 
 The previous two chapters kept things simple: `parallel {i, j} by [4, 8]` created 32 instances, each handling one element, and we never asked where those instances actually ran. That was fine for element-wise addition and for understanding data movement — the compiler picked sensible defaults. But a GPU is not a flat bag of identical processors. It has a deep hierarchy of execution units, and mapping your work to the right level of that hierarchy is the difference between a toy demo and a real kernel.
 
-This chapter introduces parallelism as a first-class concept in Croktile: what it means, how Croktile separates the *logical* structure (what runs concurrently) from the *physical* mapping (which hardware units run it), and how you control that mapping with **space specifiers**.
+This chapter introduces parallelism as a first-class concept in Croqtile: what it means, how Croqtile separates the *logical* structure (what runs concurrently) from the *physical* mapping (which hardware units run it), and how you control that mapping with **space specifiers**.
 
 ## How We Think About Parallel Tasks
 
-Before we touch any Croktile syntax, let's talk about what "parallel" actually means.
+Before we touch any Croqtile syntax, let's talk about what "parallel" actually means.
 
 Suppose you have eight independent tasks — eight tiles to add, eight rows to process, whatever. You can describe all eight at once and call them "parallel." But that statement says nothing about how many actually run at the same time. On a single CPU core, they execute one after another. On a 4-core CPU, maybe four run simultaneously. On a GPU warp, all eight might genuinely execute in lockstep.
 
@@ -19,11 +19,11 @@ The point is that parallelism is a **virtual** concept. When you write "these ei
 
 This distinction matters because GPU programming languages traditionally conflate the two. In CUDA, you launch a kernel with `<<<blocks, threads>>>` — that is simultaneously declaring the logical structure (how many instances) and the physical mapping (how many thread blocks, how many threads per block). If you want to change the tiling, you also have to change the launch configuration. The logical and physical are tangled together.
 
-Croktile untangles them.
+Croqtile untangles them.
 
-## Croktile's Two-Layer Parallelism Model
+## Croqtile's Two-Layer Parallelism Model
 
-Croktile gives you two separate knobs:
+Croqtile gives you two separate knobs:
 
 1. **`parallel`** — declares that iterations are independent and *may* run concurrently. This is a logical statement.
 2. **Space specifiers** (`: block`, `: thread`, `: group`, `: group-4`) — tell the compiler *which GPU hardware unit* each parallel axis maps to. This is a physical statement.
@@ -40,8 +40,8 @@ parallel {px, py} by [8, 16] : block    // concurrent — mapped to thread block
 
 The `parallel` lines say "these iterations are independent." The `: block` and `: thread` annotations say "put the outer ones on separate thread blocks and the inner ones on separate threads within a block." The `foreach` lines say "run these in order." No ambiguity, no conflation.
 
-![Logical vs physical parallelism in Croktile](../assets/images/ch03/fig2_logical_vs_physical_dark.png#only-dark)
-![Logical vs physical parallelism in Croktile](../assets/images/ch03/fig2_logical_vs_physical_light.png#only-light)
+![Logical vs physical parallelism in Croqtile](../assets/images/ch03/fig2_logical_vs_physical_dark.png#only-dark)
+![Logical vs physical parallelism in Croqtile](../assets/images/ch03/fig2_logical_vs_physical_light.png#only-light)
 
 *Left: the logical nesting the programmer writes (parallel = concurrent, foreach = sequential). Right: the GPU hardware hierarchy. Space specifiers bridge the two.*
 
@@ -58,7 +58,7 @@ A GPU has a clear execution hierarchy. From coarsest to finest:
 - A **warp** is 32 threads that execute in lockstep. This is the GPU's fundamental SIMD unit.
 - A **thread** is a single execution context with its own registers.
 
-Croktile maps to each level with a space specifier:
+Croqtile maps to each level with a space specifier:
 
 ![Space specifiers mapped to GPU execution hierarchy](../assets/images/ch03/fig3_space_specifiers_dark.png#only-dark)
 ![Space specifiers mapped to GPU execution hierarchy](../assets/images/ch03/fig3_space_specifiers_light.png#only-light)
@@ -134,15 +134,15 @@ In the matmul later in this chapter, the K-tiles of `lhs` and `rhs` are loaded `
 
 ## Type System Aside: `mdspan` and `ituple`
 
-Before we build the matmul, two features of Croktile's type system are worth mentioning. You have already used them implicitly; now is a good time to name them.
+Before we build the matmul, two features of Croqtile's type system are worth mentioning. You have already used them implicitly; now is a good time to name them.
 
-**`mdspan`** — every tensor in Croktile carries its shape as part of its type. When you write `s32 [128, 256] lhs`, the shape `[128, 256]` is not a runtime value — it is a compile-time property. The compiler uses it to verify that every `.at()`, `chunkat`, and `dma.copy` is dimensionally consistent. If you try `lhs.at(i, j, k)` on a 2D tensor, the compiler rejects it. The expression `output.at(px#qx, py#qy)` is verified to produce indices within the output's bounds.
+**`mdspan`** — every tensor in Croqtile carries its shape as part of its type. When you write `s32 [128, 256] lhs`, the shape `[128, 256]` is not a runtime value — it is a compile-time property. The compiler uses it to verify that every `.at()`, `chunkat`, and `dma.copy` is dimensionally consistent. If you try `lhs.at(i, j, k)` on a 2D tensor, the compiler rejects it. The expression `output.at(px#qx, py#qy)` is verified to produce indices within the output's bounds.
 
 The `span(i)` syntax extracts one dimension: `lhs.span(0)` is 128, `rhs.span(1)` is 256. The shorthand `lhs.span` copies the entire shape.
 
 **`ituple`** — the `{px, py}` syntax in `parallel {px, py} by [8, 16]` introduces an `ituple`, a compile-time integer tuple. The compose operator `px#qx` combines two ituple elements into a global index. The extent operator `#p` extracts the range of a parallel variable. These are all resolved at compile time — no runtime overhead.
 
-For the full details, see the [mdspan reference](../documentation/shape-in-choreo.md) and the [ituple reference](../documentation/integer-ituple.md). For now, the key takeaway is: Croktile catches shape mismatches at compile time, not at runtime.
+For the full details, see the [mdspan reference](../documentation/shape-in-choreo.md) and the [ituple reference](../documentation/integer-ituple.md). For now, the key takeaway is: Croqtile catches shape mismatches at compile time, not at runtime.
 
 ## Matrix Multiply: Putting It Together
 
@@ -238,7 +238,7 @@ Here is how the matmul code maps to actual GPU hardware:
 ![Matmul code mapped to GPU resources](../assets/images/ch03/fig7_matmul_gpu_layout_dark.png#only-dark)
 ![Matmul code mapped to GPU resources](../assets/images/ch03/fig7_matmul_gpu_layout_light.png#only-light)
 
-*Left: Croktile code with nested parallel and foreach. Right: GPU hardware — 128 blocks distributed across SMs, each with shared memory and 256 threads.*
+*Left: Croqtile code with nested parallel and foreach. Right: GPU hardware — 128 blocks distributed across SMs, each with shared memory and 256 threads.*
 
 ### Host Code
 
@@ -265,7 +265,7 @@ int main() {
 }
 ```
 
-Nothing new here. The host program stays boring so the Croktile function stays the star.
+Nothing new here. The host program stays boring so the Croqtile function stays the star.
 
 ## Tracing One Output Element
 

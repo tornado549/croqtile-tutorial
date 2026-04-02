@@ -9,8 +9,8 @@ Every kernel in the case studies uses the same measurement pipeline. This page s
 ```cpp
 int warmup = 10;
 int repeat = 500;
-const char* warmup_env = std::getenv("CROKTILE_TIMING_WARMUP");
-const char* repeat_env = std::getenv("CROKTILE_TIMING_REPEAT");
+const char* warmup_env = std::getenv("CROQTILE_TIMING_WARMUP");
+const char* repeat_env = std::getenv("CROQTILE_TIMING_REPEAT");
 if (warmup_env) { int value = std::atoi(warmup_env); if (value >= 0) warmup = value; }
 if (repeat_env) { int value = std::atoi(repeat_env); if (value > 0) repeat = value; }
 
@@ -70,21 +70,21 @@ These are theoretical peaks; real kernels rarely hit 100%. In the case studies, 
 
 | Variable | Default | Effect |
 | -------- | ------- | ------ |
-| `CROKTILE_TIMING_WARMUP` | `10` | Warmup iterations (0 disables) |
-| `CROKTILE_TIMING_REPEAT` | `500` | Timed iterations (must be > 0) |
-| `CROKTILE_DISABLE_TIMING` | unset | Set to `1` to skip timing entirely |
-| `CROKTILE_SKIP_VERIFY` | unset | Set to `1` to skip numerical verification |
+| `CROQTILE_TIMING_WARMUP` | `10` | Warmup iterations (0 disables) |
+| `CROQTILE_TIMING_REPEAT` | `500` | Timed iterations (must be > 0) |
+| `CROQTILE_DISABLE_TIMING` | unset | Set to `1` to skip timing entirely |
+| `CROQTILE_SKIP_VERIFY` | unset | Set to `1` to skip numerical verification |
 
-Use `CROKTILE_SKIP_VERIFY=1` only when you trust correctness. A fast wrong kernel sends the optimization search backward — always re-enable verification after changing data layout, precision, or tiling.
+Use `CROQTILE_SKIP_VERIFY=1` only when you trust correctness. A fast wrong kernel sends the optimization search backward — always re-enable verification after changing data layout, precision, or tiling.
 
 ## Compile and Run
 
-Performance `.co` files are built through the Croktile driver. A typical invocation:
+Performance `.co` files are built through the Croqtile driver. A typical invocation:
 
 ```bash
-./croktile -gs -t cute -arch=sm_90a --use-warpspec --stmatrix \
+./croqtile -gs -t cute -arch=sm_90a --use-warpspec --stmatrix \
   benchmark/performance/matmul/matmul_f16_dyn_sm90.co \
   -o /tmp/matmul.cute.result && bash /tmp/matmul.cute.result --execute
 ```
 
-Common SM90 flags: `--use-warpspec`, `--stmatrix`, `--hoist-offset`, `--hoist-scale`, `--ptx-barrier`, `--tma-cluster-aware`, `--wgmma-wait-depth=N`. Exact semantics live in Croktile's CLI help. Copy the recipe from the benchmark you are reproducing, then vary one flag at a time.
+Common SM90 flags: `--use-warpspec`, `--stmatrix`, `--hoist-offset`, `--hoist-scale`, `--ptx-barrier`, `--tma-cluster-aware`, `--wgmma-wait-depth=N`. Exact semantics live in Croqtile's CLI help. Copy the recipe from the benchmark you are reproducing, then vary one flag at a time.

@@ -24,7 +24,7 @@
 基线内核 `matmul_f16_dyn_sm90.co` 采用 **1p1c** warp 特化（一个 TMA 生产者 warpgroup、一个 WGMMA 消费者 warpgroup——角色定义见 [Chapter 5](../tutorial/ch05-branch-control.md)），**WN=128**，以及 **4 级流水线**（流水线思想见 [Chapter 6](../tutorial/ch06-synchronization.md)）。编译并运行：
 
 ```bash
-./croktile -gs -t cute -arch=sm_90a --use-warpspec --stmatrix \
+./croqtile -gs -t cute -arch=sm_90a --use-warpspec --stmatrix \
   benchmark/performance/matmul/matmul_f16_dyn_sm90.co \
   -o /tmp/matmul.cute.result && bash /tmp/matmul.cute.result --execute
 ```
@@ -191,7 +191,7 @@ K-unroll:         enabled
 在鳄霸仓库根目录执行 `make build` 之后：
 
 ```bash
-./croktile -gs -t cute -arch=sm_90a \
+./croqtile -gs -t cute -arch=sm_90a \
   --use-warpspec --stmatrix --hoist-offset --hoist-scale \
   --ptx-barrier --tma-cluster-aware \
   benchmark/performance/matmul/<INPUT>.co \
@@ -207,7 +207,7 @@ K-unroll:         enabled
 
 **选择：** 8192³ 峰值标题取 iter057。需要单个二进制在多种尺寸上表现均衡时取 iter061（2048³ 为 cuBLAS 的 100.5%，8192³ 为 80.7%）。
 
-Harness 默认：`CROKTILE_TIMING_WARMUP=10`，`CROKTILE_TIMING_REPEAT=500`。与 `.co` 文件使用同一 revision 构建，以避免 codegen drift。使用 `-arch=sm_90a`。与外部 cuBLAS 数据对比时，注明驱动版本与时钟行为。
+Harness 默认：`CROQTILE_TIMING_WARMUP=10`，`CROQTILE_TIMING_REPEAT=500`。与 `.co` 文件使用同一 revision 构建，以避免 codegen drift。使用 `-arch=sm_90a`。与外部 cuBLAS 数据对比时，注明驱动版本与时钟行为。
 
 ---
 

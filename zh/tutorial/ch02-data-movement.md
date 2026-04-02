@@ -18,10 +18,10 @@
 
 <div markdown>
 <video controls style="max-width: 100%; border-radius: 8px; margin: 1em 0;" class="only-dark">
-  <source src="/croktile-tutorial/assets/videos/ch02/anim1_element_vs_block_dark.mp4" type="video/mp4" />
+  <source src="/croqtile-tutorial/assets/videos/ch02/anim1_element_vs_block_dark.mp4" type="video/mp4" />
 </video>
 <video controls style="max-width: 100%; border-radius: 8px; margin: 1em 0;" class="only-light">
-  <source src="/croktile-tutorial/assets/videos/ch02/anim1_element_vs_block_light.mp4" type="video/mp4" />
+  <source src="/croqtile-tutorial/assets/videos/ch02/anim1_element_vs_block_light.mp4" type="video/mp4" />
 </video>
 </div>
 
@@ -64,7 +64,7 @@ int main() {
 保存为 `tiled_add.co`，编译并运行：
 
 ```bash
-croktile tiled_add.co -o tiled_add
+croqtile tiled_add.co -o tiled_add
 ./tiled_add
 ```
 
@@ -80,10 +80,10 @@ croktile tiled_add.co -o tiled_add
 
 <div markdown>
 <video controls style="max-width: 100%; border-radius: 8px; margin: 1em 0;" class="only-dark">
-  <source src="/croktile-tutorial/assets/videos/ch02/anim2_tiled_add_dark.mp4" type="video/mp4" />
+  <source src="/croqtile-tutorial/assets/videos/ch02/anim2_tiled_add_dark.mp4" type="video/mp4" />
 </video>
 <video controls style="max-width: 100%; border-radius: 8px; margin: 1em 0;" class="only-light">
-  <source src="/croktile-tutorial/assets/videos/ch02/anim2_tiled_add_light.mp4" type="video/mp4" />
+  <source src="/croqtile-tutorial/assets/videos/ch02/anim2_tiled_add_light.mp4" type="video/mp4" />
 </video>
 </div>
 
@@ -119,10 +119,10 @@ matrix.chunkat(row_tile, col_tile)
 
 <div markdown>
 <video controls style="max-width: 100%; border-radius: 8px; margin: 1em 0;" class="only-dark">
-  <source src="/croktile-tutorial/assets/videos/ch02/anim3_chunkat_dark.mp4" type="video/mp4" />
+  <source src="/croqtile-tutorial/assets/videos/ch02/anim3_chunkat_dark.mp4" type="video/mp4" />
 </video>
 <video controls style="max-width: 100%; border-radius: 8px; margin: 1em 0;" class="only-light">
-  <source src="/croktile-tutorial/assets/videos/ch02/anim3_chunkat_light.mp4" type="video/mp4" />
+  <source src="/croqtile-tutorial/assets/videos/ch02/anim3_chunkat_light.mp4" type="video/mp4" />
 </video>
 </div>
 

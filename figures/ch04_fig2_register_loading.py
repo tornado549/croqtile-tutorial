@@ -1,6 +1,6 @@
 """
 Figure 2: GPU tensor core register layout — fragmented lane ownership.
-Threads in a warp own scattered pieces of the tile; Croktile hides this.
+Threads in a warp own scattered pieces of the tile; Croqtile hides this.
 """
 import os, sys
 sys.path.insert(0, os.path.dirname(__file__))
@@ -75,7 +75,7 @@ class RegisterLoading(Scene):
             row.move_to(RIGHT * 2.8 + DOWN * (0.0 + i * 0.28))
             self.add(row)
 
-        brace_l = Text("Croktile:", font_size=14, color=C["green"], font="Monospace")
+        brace_l = Text("Croqtile:", font_size=14, color=C["green"], font="Monospace")
         brace_r = Text("mma.load / mma.store hide this", font_size=12, color=C["fg2"], font="Monospace")
         note = VGroup(brace_l, brace_r).arrange(RIGHT, buff=0.15)
         note.to_edge(DOWN, buff=0.3)

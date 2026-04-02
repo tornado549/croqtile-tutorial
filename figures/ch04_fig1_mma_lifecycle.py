@@ -129,7 +129,7 @@ class MMALifecycle(Scene):
         self.add(foot)
 
         hint = Text(
-            "Hardware: ~16×16×16 FP16 tile per instruction; Croktile hides fragment layouts.",
+            "Hardware: ~16×16×16 FP16 tile per instruction; Croqtile hides fragment layouts.",
             font_size=10,
             color=C["dim"],
             font="Monospace",

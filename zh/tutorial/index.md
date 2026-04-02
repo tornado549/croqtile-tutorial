@@ -7,7 +7,7 @@
 ## 章节目录
 
 0. [安装：搭建鳄霸编译器](ch00-installation.md)
-1. [Hello Croktile：从零到运行内核](ch01-hello-croktile.md)
+1. [Hello Croqtile：从零到运行内核](ch01-hello-croqtile.md)
 2. [数据搬运：从逐元素到数据块](ch02-data-movement.md)
 3. [并行性：将工作映射到硬件](ch03-parallelism.md)
 4. [张量核心：`mma` 操作](ch04-mma.md)

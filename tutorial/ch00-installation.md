@@ -1,6 +1,6 @@
-# Ch 0: Installing Croktile
+# Ch 0: Installing Croqtile
 
-Before writing your first kernel, you need the Croktile compiler on your machine. This chapter walks through system dependencies, building from source, and verifying the installation.
+Before writing your first kernel, you need the Croqtile compiler on your machine. This chapter walks through system dependencies, building from source, and verifying the installation.
 
 ## System Requirements
 
@@ -20,8 +20,8 @@ Most Linux distributions ship Flex and an older Bison. If your system Bison is b
 Clone the repository and run the automated setup:
 
 ```bash
-git clone https://github.com/codes1gn/croktile.git
-cd croktile
+git clone https://github.com/codes1gn/croqtile.git
+cd croqtile
 make setup-core
 ```
 
@@ -37,7 +37,7 @@ Then run the test suite to confirm everything works:
 make test
 ```
 
-If all tests pass, the `croktile` binary is ready in your build directory. Add it to your `PATH` or invoke it by its full path.
+If all tests pass, the `croqtile` binary is ready in your build directory. Add it to your `PATH` or invoke it by its full path.
 
 ## Verify the Installation
 
@@ -64,7 +64,7 @@ int main() {
 Compile and run:
 
 ```bash
-croktile verify.co -o verify
+croqtile verify.co -o verify
 ./verify
 ```
 
@@ -72,13 +72,13 @@ You should see `OK`. If you do, the compiler, linker, and runtime are all workin
 
 ## Compiler Usage
 
-The `croktile` command works like `gcc` or `clang`:
+The `croqtile` command works like `gcc` or `clang`:
 
 ```bash
-croktile program.co                     # compile and link → a.out
-croktile program.co -o my_kernel        # specify output name
-croktile -es -t cuda program.co -o out.cu  # emit CUDA source only
-croktile -E program.co                  # preprocess only
+croqtile program.co                     # compile and link → a.out
+croqtile program.co -o my_kernel        # specify output name
+croqtile -es -t cuda program.co -o out.cu  # emit CUDA source only
+croqtile -E program.co                  # preprocess only
 ```
 
 Key flags:
@@ -104,6 +104,6 @@ make sample-test                       # run all sample operator tests
 make sample-test-operator OPERATOR=add # test a specific operator
 ```
 
-These are useful when you modify Croktile itself or want to verify a specific operator family.
+These are useful when you modify Croqtile itself or want to verify a specific operator family.
 
-With the compiler installed and verified, you are ready to write your first real Croktile program in [Chapter 1](ch01-hello-croktile.md).
+With the compiler installed and verified, you are ready to write your first real Croqtile program in [Chapter 1](ch01-hello-croqtile.md).

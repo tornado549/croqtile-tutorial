@@ -1,7 +1,7 @@
 """
-Figure: GPU Memory Hierarchy — Croktile specifiers mapped to GPU hardware.
+Figure: GPU Memory Hierarchy — Croqtile specifiers mapped to GPU hardware.
 Shows the physical GPU layout (DRAM, L2, SM with SMEM and registers)
-and how Croktile's global/shared/local map to each level.
+and how Croqtile's global/shared/local map to each level.
 """
 import sys, os
 
@@ -80,8 +80,8 @@ class MemoryHierarchy(Scene):
 
             self.add(sm_box, sm_title, smem, smem_lbl, smem_size, regs, reg_label)
 
-        # Croktile side (right)
-        crk_label = Text("Croktile Specifiers", font_size=18, color=C["label_c"], font="Monospace")
+        # Croqtile side (right)
+        crk_label = Text("Croqtile Specifiers", font_size=18, color=C["label_c"], font="Monospace")
         crk_label.move_to(RIGHT * 3.5 + UP * 2.3)
         self.add(crk_label)
 
@@ -105,7 +105,7 @@ class MemoryHierarchy(Scene):
 
             self.add(box, name_t, desc_t)
 
-        # Arrows connecting Croktile specifiers to GPU hardware
+        # Arrows connecting Croqtile specifiers to GPU hardware
         arrows_data = [
             (RIGHT * 1.7 + UP * 1.4, dram.get_right(), C["global_c"]),
             (RIGHT * 1.7 + DOWN * 0.7, LEFT * 3.2 + DOWN * 0.7, C["shared_c"]),

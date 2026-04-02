@@ -4,7 +4,7 @@ Chapter 1 expressed computation at the level of individual elements: pick positi
 
 The trouble is that hardware does not actually work this way. A GPU does not fetch one 32-bit integer from memory at a time. It fetches contiguous blocks — 128 bytes, 256 bytes, sometimes more — in a single transaction, and it stages those blocks through a hierarchy of caches and on-chip buffers before any arithmetic touches them. There is a fundamental mismatch between the per-element programming model and the per-block hardware reality. Bridging that gap — thinking in blocks, managing memory levels, wiring up transfers — is the single biggest reason GPU programming is hard for newcomers.
 
-Croktile is designed around this insight. Instead of forcing you to think element-by-element and then hope the compiler or hardware will figure out the block structure, Croktile gives you **data-block-level primitives**: you name a rectangular chunk of a tensor with `chunkat`, move it between memory levels with `dma.copy`, and then work on it in-place. The programming model matches what the hardware actually does.
+Croqtile is designed around this insight. Instead of forcing you to think element-by-element and then hope the compiler or hardware will figure out the block structure, Croqtile gives you **data-block-level primitives**: you name a rectangular chunk of a tensor with `chunkat`, move it between memory levels with `dma.copy`, and then work on it in-place. The programming model matches what the hardware actually does.
 
 This chapter rewrites Chapter 1's element-wise addition to use these block-level primitives. The math is identical — every element of `lhs` is still added to the corresponding element of `rhs` — but the code now explicitly describes which blocks of data move where, and the computation happens on whole tiles rather than individual scalars.
 
@@ -18,10 +18,10 @@ This chapter rewrites Chapter 1's element-wise addition to use these block-level
 
 <div markdown>
 <video controls style="max-width: 100%; border-radius: 8px; margin: 1em 0;" class="only-dark">
-  <source src="/croktile-tutorial/assets/videos/ch02/anim1_element_vs_block_dark.mp4" type="video/mp4" />
+  <source src="/croqtile-tutorial/assets/videos/ch02/anim1_element_vs_block_dark.mp4" type="video/mp4" />
 </video>
 <video controls style="max-width: 100%; border-radius: 8px; margin: 1em 0;" class="only-light">
-  <source src="/croktile-tutorial/assets/videos/ch02/anim1_element_vs_block_light.mp4" type="video/mp4" />
+  <source src="/croqtile-tutorial/assets/videos/ch02/anim1_element_vs_block_light.mp4" type="video/mp4" />
 </video>
 </div>
 
@@ -64,7 +64,7 @@ int main() {
 Save it as `tiled_add.co`, compile and run:
 
 ```bash
-croktile tiled_add.co -o tiled_add
+croqtile tiled_add.co -o tiled_add
 ./tiled_add
 ```
 
@@ -80,10 +80,10 @@ Same `Test Passed`. The result is identical to Chapter 1's version — the math 
 
 <div markdown>
 <video controls style="max-width: 100%; border-radius: 8px; margin: 1em 0;" class="only-dark">
-  <source src="/croktile-tutorial/assets/videos/ch02/anim2_tiled_add_dark.mp4" type="video/mp4" />
+  <source src="/croqtile-tutorial/assets/videos/ch02/anim2_tiled_add_dark.mp4" type="video/mp4" />
 </video>
 <video controls style="max-width: 100%; border-radius: 8px; margin: 1em 0;" class="only-light">
-  <source src="/croktile-tutorial/assets/videos/ch02/anim2_tiled_add_light.mp4" type="video/mp4" />
+  <source src="/croqtile-tutorial/assets/videos/ch02/anim2_tiled_add_light.mp4" type="video/mp4" />
 </video>
 </div>
 
@@ -105,7 +105,7 @@ For a 2D tensor, `chunkat` takes one index per dimension:
 matrix.chunkat(row_tile, col_tile)
 ```
 
-Each dimension is divided independently. If `matrix` has shape `[64, 128]` and you declare `parallel {r, c} by [4, 8]`, then `matrix.chunkat(r, c)` gives you a `[16, 16]` piece at tile position `(r, c)`. Croktile figures out the chunk size from the tensor shape and the number of tiles along each axis.
+Each dimension is divided independently. If `matrix` has shape `[64, 128]` and you declare `parallel {r, c} by [4, 8]`, then `matrix.chunkat(r, c)` gives you a `[16, 16]` piece at tile position `(r, c)`. Croqtile figures out the chunk size from the tensor shape and the number of tiles along each axis.
 
 The key thing to remember: `chunkat` does not copy data. It is a **view** — a description of which rectangle of the original tensor you mean. The actual movement happens in `dma.copy`.
 
@@ -119,10 +119,10 @@ The key thing to remember: `chunkat` does not copy data. It is a **view** — a 
 
 <div markdown>
 <video controls style="max-width: 100%; border-radius: 8px; margin: 1em 0;" class="only-dark">
-  <source src="/croktile-tutorial/assets/videos/ch02/anim3_chunkat_dark.mp4" type="video/mp4" />
+  <source src="/croqtile-tutorial/assets/videos/ch02/anim3_chunkat_dark.mp4" type="video/mp4" />
 </video>
 <video controls style="max-width: 100%; border-radius: 8px; margin: 1em 0;" class="only-light">
-  <source src="/croktile-tutorial/assets/videos/ch02/anim3_chunkat_light.mp4" type="video/mp4" />
+  <source src="/croqtile-tutorial/assets/videos/ch02/anim3_chunkat_light.mp4" type="video/mp4" />
 </video>
 </div>
 
@@ -189,7 +189,7 @@ foreach i in [128 / #tile]
 
 `#tile` means "the **extent** of the tile axis" — how many tiles there are along that dimension. Here `#tile` is 8 (because `parallel tile by 8` declared 8 tiles), so `128 / #tile` is 16 — the number of elements in each tile. This is the trip count of the inner loop: you visit every element position within one tile.
 
-The `#` symbol does double duty in Croktile: before a name in an expression (`#tile`) it means the **extent** of that index; between two names (`tile # i`) it means **compose**. Context tells you which is which — `#` as extent always appears as a prefix, and `#` as compose always appears as an infix between two operands.
+The `#` symbol does double duty in Croqtile: before a name in an expression (`#tile`) it means the **extent** of that index; between two names (`tile # i`) it means **compose**. Context tells you which is which — `#` as extent always appears as a prefix, and `#` as compose always appears as an infix between two operands.
 
 ![The # Extent Operator](../assets/images/ch02/fig_extent_dark.png#only-dark)
 ![The # Extent Operator](../assets/images/ch02/fig_extent_light.png#only-light)
@@ -237,13 +237,13 @@ The host code is the same pattern as before — `make_spandata<choreo::s32>(64, 
 
 ## Memory Specifiers: Where Data Lives
 
-Every `dma.copy` ends with `=> local`, `=> shared`, or `=> global`. These are **memory specifiers** — Croktile's abstraction over the GPU's physical memory hierarchy. Understanding what they mean, and what hardware they map to, is worth a detour.
+Every `dma.copy` ends with `=> local`, `=> shared`, or `=> global`. These are **memory specifiers** — Croqtile's abstraction over the GPU's physical memory hierarchy. Understanding what they mean, and what hardware they map to, is worth a detour.
 
 ### The Abstraction
 
 A modern GPU has several levels of storage, each with a different size, speed, and visibility scope. Writing raw CUDA forces you to manage these levels by hand: you `cudaMalloc` global buffers, declare `__shared__` arrays with explicit sizes, and hope that the compiler maps your local variables to registers. It is one of the steepest parts of the learning curve.
 
-Croktile's memory specifiers are a deliberate simplification. Instead of worrying about CUDA's `__shared__` declarations, register pressure, or cache line alignment, you just tell `dma.copy` *where* to put the data. The compiler handles the rest — allocation sizes, bank-conflict avoidance, register spilling — so you can focus on the data flow.
+Croqtile's memory specifiers are a deliberate simplification. Instead of worrying about CUDA's `__shared__` declarations, register pressure, or cache line alignment, you just tell `dma.copy` *where* to put the data. The compiler handles the rest — allocation sizes, bank-conflict avoidance, register spilling — so you can focus on the data flow.
 
 ### The Three Levels
 
@@ -255,16 +255,16 @@ Croktile's memory specifiers are a deliberate simplification. Instead of worryin
 
 ### Mapping to GPU Hardware
 
-The figure below shows how these three specifiers correspond to the physical GPU layout. Notice the hierarchy: data moves from global (large, slow) through shared (medium, fast) to local (small, fastest). Croktile's `dma.copy` lets you express these movements directly.
+The figure below shows how these three specifiers correspond to the physical GPU layout. Notice the hierarchy: data moves from global (large, slow) through shared (medium, fast) to local (small, fastest). Croqtile's `dma.copy` lets you express these movements directly.
 
 ![Memory Specifiers → GPU Hardware](../assets/images/ch02/fig_memory_hierarchy_dark.png#only-dark)
 ![Memory Specifiers → GPU Hardware](../assets/images/ch02/fig_memory_hierarchy_light.png#only-light)
 
-*Croktile's `global`, `shared`, and `local` specifiers map directly to GPU hardware levels: HBM/DRAM, per-SM shared memory, and per-thread registers.*
+*Croqtile's `global`, `shared`, and `local` specifiers map directly to GPU hardware levels: HBM/DRAM, per-SM shared memory, and per-thread registers.*
 
 ### Choosing a Specifier
 
-The choice does not change the Croktile function's semantics — only performance. You could replace every `=> local` with `=> shared` and the program would still produce the same result, just with different speed characteristics. The rule of thumb:
+The choice does not change the Croqtile function's semantics — only performance. You could replace every `=> local` with `=> shared` and the program would still produce the same result, just with different speed characteristics. The rule of thumb:
 
 | Situation | Use | Why |
 |-----------|-----|-----|

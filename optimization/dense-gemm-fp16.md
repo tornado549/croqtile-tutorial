@@ -1,8 +1,8 @@
-# How to Optimize a Croktile FP16 GEMM for cuBLAS-like Performance: a Worklog
+# How to Optimize a Croqtile FP16 GEMM for cuBLAS-like Performance: a Worklog
 
-In this post, I'll iteratively optimize a Hopper (SM90a) half-precision matrix multiply written in Croktile. My goal is not to build a cuBLAS replacement, but to deeply understand the performance characteristics of H800 GPUs through the lens of Croktile's abstractions — warp specialization, TMA pipelining, tile geometry, and compiler-flag tuning. You can find all kernel sources under `benchmark/performance/matmul/` in the Croktile repository.
+In this post, I'll iteratively optimize a Hopper (SM90a) half-precision matrix multiply written in Croqtile. My goal is not to build a cuBLAS replacement, but to deeply understand the performance characteristics of H800 GPUs through the lens of Croqtile's abstractions — warp specialization, TMA pipelining, tile geometry, and compiler-flag tuning. You can find all kernel sources under `benchmark/performance/matmul/` in the Croqtile repository.
 
-Matrix multiplication on GPUs may currently be the most important algorithm that exists, considering it makes up almost all the FLOPs during training and inference of large deep-learning models. So how much work is it to push a correct Croktile SGEMM from "it runs" to "it matches cuBLAS"? Starting from a baseline and step-by-step applying optimizations, we get within 101% of cuBLAS:
+Matrix multiplication on GPUs may currently be the most important algorithm that exists, considering it makes up almost all the FLOPs during training and inference of large deep-learning models. So how much work is it to push a correct Croqtile SGEMM from "it runs" to "it matches cuBLAS"? Starting from a baseline and step-by-step applying optimizations, we get within 101% of cuBLAS:
 
 | Step | Kernel | TFLOPS @8192³ | vs cuBLAS (~380) |
 | ---- | ------ | ------------- | ---------------- |
@@ -15,7 +15,7 @@ Matrix multiplication on GPUs may currently be the most important algorithm that
 
 ## Step 0: The Baseline
 
-In Croktile's programming model, a matmul kernel is a `__co__` function that describes operand flow through TMA, shared memory staging, and WGMMA accumulation. The Croktile compiler transpiles this into Hopper-native PTX with warp specialization, pipelining, and swizzled addressing. The important knobs are:
+In Croqtile's programming model, a matmul kernel is a `__co__` function that describes operand flow through TMA, shared memory staging, and WGMMA accumulation. The Croqtile compiler transpiles this into Hopper-native PTX with warp specialization, pipelining, and swizzled addressing. The important knobs are:
 
 - `MATMUL_WARP_N` — the N extent of the WGMMA tile (how wide each block's output is)
 - `MATMUL_STAGES` — operand ring slots along K (how deep the async pipeline is)
@@ -24,7 +24,7 @@ In Croktile's programming model, a matmul kernel is a `__co__` function that des
 The baseline kernel `matmul_f16_dyn_sm90.co` uses **1p1c** warp specialization (one TMA producer warpgroup, one WGMMA consumer warpgroup — roles from [Chapter 5](../tutorial/ch05-branch-control.md)), **WN=128**, and **4 pipeline stages** (the pipelining idea from [Chapter 6](../tutorial/ch06-synchronization.md)). Compile and run:
 
 ```bash
-./croktile -gs -t cute -arch=sm_90a --use-warpspec --stmatrix \
+./croqtile -gs -t cute -arch=sm_90a --use-warpspec --stmatrix \
   benchmark/performance/matmul/matmul_f16_dyn_sm90.co \
   -o /tmp/matmul.cute.result && bash /tmp/matmul.cute.result --execute
 ```
@@ -171,7 +171,7 @@ At WN=168, shared memory exceeds 228 KB. Residency drops from 2 blocks to 1 bloc
 
 ## Compiler Flags: The Last Layer
 
-With function structure settled, how the compiler lowers Croktile to PTX matters. The shipped builds share a common flag bundle:
+With function structure settled, how the compiler lowers Croqtile to PTX matters. The shipped builds share a common flag bundle:
 
 | Flag | Purpose |
 | ---- | ------- |
@@ -188,10 +188,10 @@ Flags matter — iter023 showed +5% at 2048³ from `--ptx-barrier` and `--stmatr
 
 ## Shipped Checkpoints and Reproduction
 
-From the Croktile repo root after `make build`:
+From the Croqtile repo root after `make build`:
 
 ```bash
-./croktile -gs -t cute -arch=sm_90a \
+./croqtile -gs -t cute -arch=sm_90a \
   --use-warpspec --stmatrix --hoist-offset --hoist-scale \
   --ptx-barrier --tma-cluster-aware \
   benchmark/performance/matmul/<INPUT>.co \
@@ -207,7 +207,7 @@ From the Croktile repo root after `make build`:
 
 **Choosing:** iter057 for peak 8192³ headline. iter061 for one binary that behaves well across sizes (100.5% cuBLAS at 2048³, 80.7% at 8192³).
 
-Harness defaults: `CROKTILE_TIMING_WARMUP=10`, `CROKTILE_TIMING_REPEAT=500`. Build from the same revision as the `.co` file to avoid codegen drift. Use `-arch=sm_90a`. When comparing to external cuBLAS figures, note driver version and clock behavior.
+Harness defaults: `CROQTILE_TIMING_WARMUP=10`, `CROQTILE_TIMING_REPEAT=500`. Build from the same revision as the `.co` file to avoid codegen drift. Use `-arch=sm_90a`. When comparing to external cuBLAS figures, note driver version and clock behavior.
 
 ---
 
@@ -217,6 +217,6 @@ Writing this took ~65 iterations across three phases. Phase 1 spent 38 iteration
 
 The largest single structural win was not a compiler flag — it was **1p2c split-output** moving TFLOPS into the 370–382 band. Flags like `--stmatrix` matter, but they cannot recover serialization on `output_s` if two consumers share one accumulator tile. When you face a similar ceiling in your own kernel, check whether the output path is the bottleneck before reaching for instruction-level levers.
 
-The +83% came entirely from Croktile function geometry, output staging, and compiler flags — no mixed precision, no split-K, no CUDA Graph capture.
+The +83% came entirely from Croqtile function geometry, output staging, and compiler flags — no mixed precision, no split-K, no CUDA Graph capture.
 
 Full iteration tables: `README_matmul_f16_aitune_2026-03-23.md`. Sources: `matmul_f16_dyn_sm90.co`, `matmul_f16_dyn_sm90_warpspec_1p1c.co`, `matmul_f16_dyn_sm90_warpspec_1p2c.co`, and dated `*_iter048_*` through `*_iter061_*` builds.
