@@ -67,7 +67,11 @@ markdown_extensions:
   - toc:
       permalink: true
   - admonition
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.details
@@ -98,6 +102,7 @@ nav:
     - "Dense GEMM FP16": optimization/dense-gemm-fp16.md
     - "Sparse GEMM (FP16 + E4M3)": optimization/sparse-gemm.md
     - "Block-Scaled GEMM FP8": optimization/blockscale-gemm-fp8.md
+    - "Fused MoE FP8": optimization/fused-moe-fp8.md
 
   - "Part III — Coding Reference":
     - Home: documentation/index.md

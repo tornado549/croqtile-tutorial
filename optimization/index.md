@@ -15,3 +15,7 @@ Structured 2:4 sparse GEMM at 4096 × 8192 × 8192. FP16: **368 → 655 TFLOPS**
 ## [Block-Scaled GEMM FP8](blockscale-gemm-fp8.md)
 
 FP8 E4M3 with per-block scaling: **397 → 621 TFLOPS** (+56%). TMA overlap with scale accumulation, N256 tiles, L2 promotion, and scale prefetch.
+
+## [Fused MoE FP8](fused-moe-fp8.md)
+
+Fused Mixture-of-Experts end-to-end kernel for Qwen3.5-35B-A3B inference: **7.11 → 13.14 TFLOPS** (+85%). Kernel fusion (7→4 kernels), `parallel.async`, CUDA Graphs, L2 persistence, QSG load pipelining, and the `__cpp__` escape hatch.
