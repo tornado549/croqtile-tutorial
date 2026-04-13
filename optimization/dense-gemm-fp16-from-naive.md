@@ -28,11 +28,11 @@ bash kernel.cute.result --execute
 | v0: Naive | ~2890 | 0.38 | 0.08% |
 | v1: Shared memory | ~728 | 1.51 | 0.34% |
 | v2: Hopper TMA + WGMMA | 3.87 | 284.4 | 63.6% |
-| v3: Warp specialization | 3.26 | 337.0 | 75.3% |
-| **v4: Production-tuned** | **2.35** | **471.3** | **105.3%** |
+| v3: Warp specialization | 3.81 | 288.3 | 64.4% |
+| **v4: Production-tuned** | **2.24** | **489.9** | **109.5%** |
 | cuBLAS (reference) | 2.46 | 447.5 | 100.0% |
 
-1240× improvement from v0 to v4 in five steps. Let's see how each one works.
+1289× improvement from v0 to v4 in five steps. Let's see how each one works.
 
 ---
 
@@ -316,7 +316,7 @@ The insight from v2's profile: producer (TMA) and consumer (WGMMA) stall each ot
 
 ```choreo
 // WARP_M=64, WARP_N=128, WARP_K=16
-// TILE_M=128, TILE_K=64, STAGES=1, CONSUMERS=1
+// TILE_M=64, TILE_K=64, STAGES=1, CONSUMERS=1
 
 __co__ void matmul(
     global f16 [M, K] lhs,
@@ -326,23 +326,26 @@ __co__ void matmul(
     shared event full[STAGES], empty[STAGES];
     shared f16 [TILE_M, TILE_K] lhs_s[STAGES];
     shared f16 [WARP_N, TILE_K] rhs_s[STAGES];
+    shared f16 [WARP_M, WARP_N] output_s[CONSUMERS];
 
-    // 3 warpgroups × 128 threads = 384 threads/block
-    parallel wg by 3 : group-4, t by 128 : thread {
+    // 2 warpgroups × 128 threads = 256 threads/block
+    parallel wg by 2 : group-4, t by 128 : thread {
       // ── Producer (wg=0): one thread drives TMA ──
       inthreads.async (wg == 0 && t == 0) {
         foreach {iv_k} in [cdiv(K, TILE_K)] {
           stage = iv_k % STAGES;
           wait empty[stage];
           tma.copy.async<full[stage]>.swiz<SWIZ>
-            lhs.subspan(TILE_M, TILE_K).at(block_m, iv_k) => lhs_s[stage];
+            lhs.subspan(TILE_M, TILE_K)
+              .at(block_m, iv_k) => lhs_s[stage];
           tma.copy.async<full[stage]>.swiz<SWIZ>
-            rhs.subspan(WARP_N, TILE_K).at(block_n, iv_k) => rhs_s[stage];
+            rhs.subspan(WARP_N, TILE_K)
+              .at(block_n, iv_k) => rhs_s[stage];
           trigger full[stage];
         }
       }
 
-      // ── Consumers (wg>=1): compute WGMMA ──
+      // ── Consumer (wg=1): compute WGMMA ──
       inthreads.async (wg >= 1) {
         cidx = wg - 1;
         foreach {s} in [STAGES]
@@ -354,17 +357,20 @@ __co__ void matmul(
           wait full[stage];
 
           foreach {iv_wk} in [cdiv(TILE_K, WARP_K)] {
-            ma = mma.load.swiz<SWIZ> 
-                  lhs_s[stage].subspan(WARP_M, WARP_K).at(cidx, iv_wk);
-            mb = mma.load.swiz<SWIZ> rhs_s[stage].chunkat(_, iv_wk);
+            ma = mma.load.swiz<SWIZ>
+              lhs_s[stage].subspan(WARP_M, WARP_K)
+                .at(cidx, iv_wk);
+            mb = mma.load.swiz<SWIZ>
+              rhs_s[stage].chunkat(_, iv_wk);
             mma.row.row mc, ma, mb;
           }
+          mma.commit;
           trigger empty[stage];
         }
-        shared f16 [WARP_M, WARP_N] output_s[CONSUMERS];
         mma.store mc, output_s[cidx];
         tma.copy output_s[cidx] =>
-          output.subspan(WARP_M, WARP_N).at(block_m * CONSUMERS + cidx, block_n);
+          output.subspan(WARP_M, WARP_N)
+            .at(block_m * CONSUMERS + cidx, block_n);
       }
 
     }
@@ -400,7 +406,7 @@ if (wg == 0 && threadIdx.x % 128 == 0) {      // producer
         full[iv_k % STAGES], 1, bytes);        // trigger full
   }
 }
-if (wg >= 1) {                                 // consumers
+if (wg >= 1) {                                 // consumer
   for (int iv_k = 0; ...) {
     full[iv_k % STAGES].wait(...);             // wait full
     /* WGMMA (same as v2) */
@@ -409,7 +415,7 @@ if (wg >= 1) {                                 // consumers
 }
 ```
 
-**Result: ~337 TFLOPS (1.19× over v2, 75.3% of cuBLAS)**
+**Result: ~288 TFLOPS (1.01× over v2, 64.4% of cuBLAS)**
 
 ---
 
@@ -461,7 +467,7 @@ warp occupancy   (% of peak)        :  27.74%   ← ~2 blocks/SM (smem-limited)
 
 SM and tensor-core utilisation are at 89.7% — the kernel is firmly in the compute-bound regime. DRAM at 39% means TMA is successfully prefetching ahead. Warp occupancy at 27.7% reflects the shared memory footprint (~80 KB per block) allowing 2 concurrent blocks per SM on H800.
 
-**Result: ~471 TFLOPS (1.40× over v3, 105% of cuBLAS on this GPU)**
+**Result: ~490 TFLOPS (1.70× over v3, 109% of cuBLAS on this GPU)**
 
 ---
 
@@ -474,8 +480,8 @@ Profiled with a single kernel launch (`ncu --launch-count 1`):
 | v0 naive | 0.01 | 5.99 | 0 | 336,592,896 | 0.38 |
 | v1 smem | 0.02 | 6.12 | 0 | 336,592,896 | 1.51 |
 | v2 tma/wgmma | 10.64 | 42.83 | 264,192 | 247,820 | 284.4 |
-| v3 warpspec | 32.97 | 56.13 | 9,418,787 | — | 337.0 |
-| v4 tuned | 38.91 | 89.68 | 9,492,372 | — | 471.3 |
+| v3 warpspec | 32.97 | 56.13 | 9,418,787 | — | 288.3 |
+| v4 tuned | 38.91 | 89.68 | 9,492,372 | — | 489.9 |
 
 - **v0→v1**: same scalar FMAs; shared memory fixes redundant reads but compute is unchanged.
 - **v2**: tensor core instructions appear; SM jumps from 6% to 43% — but TMA and WGMMA serialise.
@@ -500,7 +506,7 @@ ncu --target-processes all --launch-count 1 \
 
 ## The Tuning Journey: v3 → v4
 
-v4 was not designed upfront — it was found by a systematic 28-iteration parameter sweep starting from v3. Here is the actual log. This is the core of the tutorial: the techniques above give you a structurally correct kernel, but the last 40% comes from tuning.
+v4 was not designed upfront — it was found by a systematic 28-iteration parameter sweep starting from v3. Here is the actual log. This is the core of the tutorial: the techniques above give you a structurally correct kernel, but the last 70% comes from tuning.
 
 ### Baseline: v3 (STAGES=1, CONSUMERS=1, WARP_N=128)
 
@@ -521,7 +527,7 @@ The first structural change is enabling double-buffering and a second consumer w
 
 | Iter | Change | TFLOPS | Notes |
 |------|--------|-------:|-------|
-| iter000 | baseline (STAGES=1, CONS=1) | 337 | latency-bound |
+| iter000 | baseline (STAGES=1, CONS=1) | 288 | latency-bound |
 | iter001 | STAGES=2, CONS=1 | — | **CRASH** — `parallel wg by 3` spawns 3 warpgroups regardless of `CONSUMERS`; mismatch causes OOB smem write |
 | iter002 | STAGES=2, CONS=2, WARP_N=128 | 365 | first working double-buffer (+8%) |
 | iter003 | STAGES=2, CONS=2, WARP_N=152 | 402 | intermediate config, bottleneck shifts to compute-bound (+19%) |
@@ -591,7 +597,7 @@ Running cuBLAS via PyTorch's `torch.mm` on the same 8192×8192×8192 f16 problem
 | Implementation | Time (ms) | TFLOPS | % |
 | --- | ---: | ---: | ---: |
 | cuBLAS (`torch.mm`) | 2.46 | 447.5 | 100% |
-| **Croqtile v4 (tuned)** | **2.35** | **471.3** | **105.3%** |
+| **Croqtile v4 (tuned)** | **2.24** | **489.9** | **109.5%** |
 
 The slight edge over cuBLAS comes from the WARP_N=192 tile hitting a better L2/SMEM working-set balance on this specific GPU model. Production cuBLAS also includes features outside this tutorial's scope:
 
@@ -605,15 +611,15 @@ All three can be expressed in Croqtile — the production-grade kernels in the r
 
 ## The optimization ladder
 
-![Optimization ladder: TFLOPS progression from v0 (0.38) through v4 (471), compared to cuBLAS (447)](assets/img/optimization_ladder.png#only-dark)
-![Optimization ladder: TFLOPS progression from v0 (0.38) through v4 (471), compared to cuBLAS (447)](assets/img/optimization_ladder_light.png#only-light)
+![Optimization ladder: TFLOPS progression from v0 (0.38) through v4 (490), compared to cuBLAS (447)](assets/img/optimization_ladder.png#only-dark)
+![Optimization ladder: TFLOPS progression from v0 (0.38) through v4 (490), compared to cuBLAS (447)](assets/img/optimization_ladder_light.png#only-light)
 
 | Step | Technique | Key Croqtile construct | Speedup |
 | --- | --- | --- | ---: |
 | v0 → v1 | SMEM tiling | `shared`, `dma.copy`, `.subspan().at()` | 3.9× |
 | v1 → v2 | TMA + WGMMA | `: group-4`, `tma.copy.swiz<>`, `mma.load.swiz<>` | 188× |
-| v2 → v3 | Warp specialization | `inthreads.async`, `shared event`, `wait/trigger` | 1.19× |
-| v3 → v4 | Pipeline tuning | STAGES=2, CONSUMERS=2, WARP_N=192 (28-iter sweep) | 1.40× |
+| v2 → v3 | Warp specialization | `inthreads.async`, `shared event`, `wait/trigger` | 1.01× |
+| v3 → v4 | Pipeline tuning | STAGES=2, CONSUMERS=2, WARP_N=192 (28-iter sweep) | 1.70× |
 
 ---
 
