@@ -16,7 +16,7 @@ class CompileAndRun(Scene):
     def construct(self):
         self.camera.background_color = C["bg"]
 
-        term_box = Rectangle(width=11, height=6.5, fill_color=C["term_bg"],
+        term_box = Rectangle(width=11, height=7.0, fill_color=C["term_bg"],
                              fill_opacity=1, stroke_color=C["term_border"], stroke_width=2)
         term_box.move_to(ORIGIN)
 
@@ -47,24 +47,29 @@ class CompileAndRun(Scene):
             line_y -= 0.35
             return t
 
+        space_w = Text("x x", font_size=15, font="Monospace").width - \
+                  Text("xx", font_size=15, font="Monospace").width
+
         def type_line(prompt_text, cmd_text, delay=0.03):
             nonlocal line_y
-            prompt = Text(prompt_text, font_size=15, color=C["prompt_c"], font="Monospace")
+            prompt = Text(prompt_text.rstrip(), font_size=15, color=C["prompt_c"], font="Monospace")
             prompt.move_to([left_x + prompt.width / 2, line_y, 0])
+            n_spaces = len(prompt_text) - len(prompt_text.rstrip())
+            cmd_start = left_x + prompt.width + n_spaces * space_w
             self.play(FadeIn(prompt), run_time=0.15)
 
             cmd = Text(cmd_text, font_size=15, color=C["cmd_c"], font="Monospace")
-            cmd.move_to([left_x + prompt.width + 0.08 + cmd.width / 2, line_y, 0])
+            cmd.move_to([cmd_start + cmd.width / 2, line_y, 0])
 
             cursor = Rectangle(width=0.1, height=0.22, fill_color=C["cursor_c"],
                                 fill_opacity=0.8, stroke_width=0)
-            cursor.move_to([left_x + prompt.width + 0.15, line_y, 0])
+            cursor.move_to([cmd_start, line_y, 0])
             self.add(cursor)
 
             for i, char in enumerate(cmd_text):
                 partial = Text(cmd_text[:i + 1], font_size=15, color=C["cmd_c"], font="Monospace")
-                partial.move_to([left_x + prompt.width + 0.08 + partial.width / 2, line_y, 0])
-                cursor.move_to([left_x + prompt.width + 0.08 + partial.width + 0.06, line_y, 0])
+                partial.move_to([cmd_start + partial.width / 2, line_y, 0])
+                cursor.move_to([cmd_start + partial.width + 0.06, line_y, 0])
                 if i > 0:
                     self.remove(lines[-1])
                 lines.add(partial)

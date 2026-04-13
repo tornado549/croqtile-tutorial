@@ -41,14 +41,11 @@ class ElementVsBlock(Scene):
 
         cells_l = VGroup()
         for i in range(8):
-            r = Rectangle(width=0.55, height=0.55, fill_color=C["fill"],
-                          fill_opacity=1, stroke_color=C["fg3"], stroke_width=1)
+            r = Rectangle(width=0.55, height=0.55, fill_color=C["tile"],
+                          fill_opacity=0.35, stroke_color=C["tile"], stroke_width=1.5)
             r.move_to(left_origin + RIGHT * (i - 3.5) * 0.6)
             idx = Text(str(i), font_size=12, color=C["fg2"], font="Monospace").move_to(r)
             cells_l.add(VGroup(r, idx))
-
-        thread_label_l = Text("Threads", font_size=16, color=C["fg2"], font="Monospace")
-        thread_label_l.move_to(left_origin + DOWN * 2.2)
 
         threads_l = VGroup()
         arrows_l = VGroup()
@@ -67,17 +64,29 @@ class ElementVsBlock(Scene):
             )
             arrows_l.add(arr)
 
+        thread_label_l = Text("Threads", font_size=16, color=C["fg2"], font="Monospace")
+        thread_label_l.next_to(threads_l, DOWN, buff=0.15)
+
+        hl_idx = 3
+        hl_cell = SurroundingRectangle(cells_l[hl_idx], color=C["hl_c"],
+                                       stroke_width=2.5, buff=0.06)
+        hl_thread = Circle(radius=0.26, color=C["hl_c"], stroke_width=2.5)
+        hl_thread.move_to(threads_l[hl_idx])
+        hl_box_l = RoundedRectangle(width=2.6, height=0.45, fill_color=C["hl_c"],
+                                   fill_opacity=0.15, stroke_color=C["hl_c"],
+                                   stroke_width=1.5, corner_radius=0.1)
+        hl_text = Text("1 thread → 1 element", font_size=13,
+                       color=C["hl_c"], font="Monospace")
+        hl_box_l.next_to(global_label_l, UP, buff=0.15)
+        hl_text.move_to(hl_box_l)
+
         code_l = Text(
             "parallel {i} by [8]\n  out.at(i) = a.at(i) + b.at(i);",
             font_size=13, color=C["fg2"], font="Monospace"
         ).move_to(left_origin + DOWN * 4.2)
 
-        desc_l = Text(
-            "8 threads, 8 individual reads\neach thread: 1 element",
-            font_size=12, color=C["fg3"], font="Monospace"
-        ).move_to(left_origin + DOWN * 5.5)
-
-        self.add(global_label_l, cells_l, thread_label_l, threads_l, arrows_l, code_l, desc_l)
+        self.add(global_label_l, cells_l, thread_label_l, threads_l, arrows_l,
+                 hl_cell, hl_thread, hl_box_l, hl_text, code_l)
 
         # --- Right side: data-block ---
         right_origin = RIGHT * 3.5 + UP * 1.2
@@ -97,9 +106,6 @@ class ElementVsBlock(Scene):
         tile_label = Text("1 tile (8 elements)", font_size=13, color=C["tile"], font="Monospace")
         tile_label.next_to(tile_bracket, DOWN, buff=0.1)
 
-        local_label = Text("Local Memory", font_size=16, color=C["green_dk"], font="Monospace")
-        local_label.move_to(right_origin + DOWN * 2.0)
-
         local_tile = VGroup()
         for i in range(8):
             r = Rectangle(width=0.55, height=0.55, fill_color=C["green_dk"],
@@ -108,27 +114,34 @@ class ElementVsBlock(Scene):
             idx = Text(str(i), font_size=12, color=C["fg"], font="Monospace").move_to(r)
             local_tile.add(VGroup(r, idx))
 
+        local_label = Text("Local Memory", font_size=16, color=C["green_dk"], font="Monospace")
+        local_label.next_to(local_tile, UP, buff=0.15)
+
         dma_arrow = Arrow(
-            start=right_origin + DOWN * 0.3,
-            end=right_origin + DOWN * 2.1,
-            buff=0.15, stroke_width=3, color=C["arrow"],
+            start=tile_label.get_bottom(),
+            end=local_label.get_top(),
+            buff=0.1, stroke_width=3, color=C["arrow"],
             max_tip_length_to_length_ratio=0.1
         )
         dma_label = Text("dma.copy", font_size=14, color=C["arrow"], font="Monospace")
         dma_label.next_to(dma_arrow, RIGHT, buff=0.15)
+
+        hl_box_r = RoundedRectangle(width=2.6, height=0.45, fill_color=C["hl_c"],
+                                   fill_opacity=0.15, stroke_color=C["hl_c"],
+                                   stroke_width=1.5, corner_radius=0.1)
+        hl_text_r = Text("1 DMA → entire tile", font_size=13,
+                         color=C["hl_c"], font="Monospace")
+        hl_box_r.next_to(global_label_r, UP, buff=0.15)
+        hl_text_r.move_to(hl_box_r)
 
         code_r = Text(
             "parallel tile by N {\n  f = dma.copy a.chunkat(tile) => local;\n  // compute on f.data\n}",
             font_size=13, color=C["fg2"], font="Monospace"
         ).move_to(right_origin + DOWN * 4.4)
 
-        desc_r = Text(
-            "1 DMA, 1 bulk transfer\nentire tile moves at once",
-            font_size=12, color=C["fg3"], font="Monospace"
-        ).move_to(right_origin + DOWN * 5.7)
-
         self.add(global_label_r, tile_r, tile_bracket, tile_label,
-                 local_label, local_tile, dma_arrow, dma_label, code_r, desc_r)
+                 local_label, local_tile, dma_arrow, dma_label,
+                 hl_box_r, hl_text_r, code_r)
 
 
 if __name__ == "__main__":
